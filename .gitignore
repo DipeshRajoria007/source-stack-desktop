@@ -1,8 +1,12 @@
 /bin/
 /obj/
+**/bin/
+**/obj/
 /.vs/
 /.idea/
 *.user
 *.suo
 *.nupkg
 TestResults/
+.DS_Store
+artifacts/*.exe
