@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using SourceStack.Core.Auth;
 using SourceStack.Core.Google;
 using SourceStack.Core.Jobs;
@@ -15,7 +16,7 @@ public static class SourceStackCoreFactory
         GoogleOAuthOptions oauthOptions,
         ILoggerFactory? loggerFactory = null)
     {
-        loggerFactory ??= LoggerFactory.Create(_ => { });
+        loggerFactory ??= NullLoggerFactory.Instance;
 
         var httpClient = new HttpClient();
 
