@@ -15,7 +15,7 @@ SourceStack was intentionally moved to a desktop-first, local-compute architectu
 
 ### 1) Web Era: FastAPI + Web App
 
-The original implementation lived in `source-stack-api` and `source-stack-web`.
+The original implementation lived in [`source-stack-api`](https://github.com/DipeshRajoria007/source-stack-api) and [`source-stack-web`](https://github.com/DipeshRajoria007/source-stack-web).
 
 How it worked:
 - FastAPI handled parsing endpoints and orchestration.
