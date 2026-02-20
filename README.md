@@ -24,8 +24,8 @@ How it worked:
 
 Why we moved:
 - Requirement changed to local-only compute for resume processing.
+- Major driver was infra cost from running web backend/worker infrastructure.
 - Running service infrastructure for desktop usage was unnecessary overhead.
-- Needed a native desktop experience instead of browser-only flow.
 
 ### 2) Windows Desktop Era: `.NET 8` + WinForms + C# Core
 
