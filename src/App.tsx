@@ -105,7 +105,7 @@ function App() {
       await refreshJobs();
       if (!loadedSettings.googleClientId.trim()) {
         setMessage(
-          "This app build is missing Google OAuth configuration. Contact Dipesh.",
+          "This app build is missing Google OAuth configuration. Contact Dipesh from engineering team.",
         );
       } else {
         setMessage("Workspace ready");
@@ -673,7 +673,7 @@ function App() {
 
             <div className="notice notice-info">
               End users only use Sign In / Sign Out. OAuth client credentials are
-              bundled by Dipesh.
+              bundled by Dipesh from engineering team.
             </div>
 
             {!settings.googleClientId.trim() && (

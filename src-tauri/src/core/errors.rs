@@ -20,7 +20,7 @@ pub enum AuthErrorCode {
 pub enum CoreError {
     #[error("Google API request failed with status {status}: {body}")]
     GoogleApi { status: u16, body: String },
-    #[error("Google OAuth is not configured in this app build. Contact Dipesh.")]
+    #[error("Google OAuth is not configured in this app build. Contact Dipesh from engineering team.")]
     MissingGoogleClientId,
     #[error("{message}")]
     Auth {
