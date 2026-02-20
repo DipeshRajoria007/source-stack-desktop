@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import "./App.css";
 import {
   cancelJob,
   getJobResults,
   getJobStatus,
   getSettings,
+  googleAuthBeginManual,
+  googleAuthCompleteManual,
   googleAuthSignIn,
   googleAuthSignOut,
   googleAuthStatus,
@@ -16,16 +19,19 @@ import {
 import type {
   AuthStatus,
   JobStatus,
+  ManualAuthChallenge,
   ParsedCandidate,
-  RuntimeSettings,
+  RuntimeSettingsUpdate,
+  RuntimeSettingsView,
 } from "./lib/types";
 import { arrayBufferToBase64, formatDateTime } from "./lib/utils";
 
 type TabKey = "dashboard" | "jobs" | "settings";
 
-const defaultSettings: RuntimeSettings = {
+const defaultSettings: RuntimeSettingsView = {
   googleClientId: "",
-  googleClientSecret: "",
+  googleClientSecretConfigured: false,
+  legacySecretScrubbed: false,
   tesseractPath: "tesseract",
   maxConcurrentRequests: 10,
   spreadsheetBatchSize: 100,
@@ -38,7 +44,7 @@ function App() {
   const [tab, setTab] = useState<TabKey>("dashboard");
   const [message, setMessage] = useState("Ready");
 
-  const [settings, setSettings] = useState<RuntimeSettings>(defaultSettings);
+  const [settings, setSettings] = useState<RuntimeSettingsView>(defaultSettings);
   const [auth, setAuth] = useState<AuthStatus>({ signedIn: false });
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -55,6 +61,14 @@ function App() {
 
   const [busyAuth, setBusyAuth] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
+
+  const [manualAuthVisible, setManualAuthVisible] = useState(false);
+  const [manualAuthReason, setManualAuthReason] = useState("");
+  const [manualAuthChallenge, setManualAuthChallenge] =
+    useState<ManualAuthChallenge | null>(null);
+  const [manualAuthInput, setManualAuthInput] = useState("");
+  const [manualAuthBusy, setManualAuthBusy] = useState(false);
+  const [manualAuthError, setManualAuthError] = useState("");
 
   useEffect(() => {
     void bootstrap();
@@ -86,11 +100,16 @@ function App() {
         getSettings(),
         googleAuthStatus(),
       ]);
-
       setSettings(loadedSettings);
       setAuth(loadedAuth);
       await refreshJobs();
-      setMessage("Workspace ready");
+      if (!loadedSettings.googleClientId.trim()) {
+        setMessage(
+          "This app build is missing Google OAuth configuration. Contact Dipesh.",
+        );
+      } else {
+        setMessage("Workspace ready");
+      }
     } catch (error) {
       setMessage(`Failed to initialize: ${String(error)}`);
     }
@@ -155,7 +174,13 @@ function App() {
       await refreshJobs();
       await refreshStatus(response.jobId, true);
     } catch (error) {
-      setMessage(`Batch start failed: ${String(error)}`);
+      const text = String(error);
+      if (text.toLowerCase().includes("authentication required")) {
+        setMessage("Google sign-in is required before starting a batch job.");
+        setManualAuthVisible(true);
+      } else {
+        setMessage(`Batch start failed: ${text}`);
+      }
     }
   }
 
@@ -202,9 +227,20 @@ function App() {
     setBusyAuth(true);
     setMessage("Opening browser for Google sign-in...");
     try {
-      const status = await googleAuthSignIn();
-      setAuth(status);
-      setMessage(`Signed in${status.email ? ` as ${status.email}` : ""}`);
+      const result = await googleAuthSignIn();
+      if (result.state === "signed_in") {
+        setAuth(result.status);
+        setManualAuthVisible(false);
+        setManualAuthChallenge(null);
+        setManualAuthInput("");
+        setManualAuthError("");
+        setMessage(`Signed in${result.status.email ? ` as ${result.status.email}` : ""}`);
+      } else {
+        setManualAuthVisible(true);
+        setManualAuthReason(result.message);
+        setMessage("Automatic callback did not finish. Use manual sign-in fallback.");
+        await handleBeginManualAuth(true);
+      }
     } catch (error) {
       setMessage(`Google sign-in failed: ${String(error)}`);
     } finally {
@@ -218,6 +254,10 @@ function App() {
       await googleAuthSignOut();
       const status = await googleAuthStatus();
       setAuth(status);
+      setManualAuthVisible(false);
+      setManualAuthChallenge(null);
+      setManualAuthInput("");
+      setManualAuthError("");
       setMessage("Signed out from Google");
     } catch (error) {
       setMessage(`Sign-out failed: ${String(error)}`);
@@ -226,10 +266,80 @@ function App() {
     }
   }
 
+  async function handleBeginManualAuth(openImmediately: boolean) {
+    setManualAuthBusy(true);
+    setManualAuthError("");
+    try {
+      const challenge = await googleAuthBeginManual();
+      setManualAuthChallenge(challenge);
+      setManualAuthVisible(true);
+      if (openImmediately) {
+        await openUrl(challenge.authorizeUrl);
+      }
+      setMessage("Manual sign-in challenge ready");
+    } catch (error) {
+      setManualAuthError(String(error));
+      setMessage(`Failed to start manual sign-in: ${String(error)}`);
+    } finally {
+      setManualAuthBusy(false);
+    }
+  }
+
+  async function handleOpenManualAuthUrl() {
+    if (!manualAuthChallenge) {
+      return;
+    }
+
+    try {
+      await openUrl(manualAuthChallenge.authorizeUrl);
+    } catch (error) {
+      setManualAuthError(`Failed to open URL: ${String(error)}`);
+    }
+  }
+
+  async function handleCompleteManualAuth() {
+    if (!manualAuthChallenge) {
+      setManualAuthError("Generate a manual challenge first.");
+      return;
+    }
+
+    if (!manualAuthInput.trim()) {
+      setManualAuthError("Paste callback URL or authorization code.");
+      return;
+    }
+
+    setManualAuthBusy(true);
+    setManualAuthError("");
+    try {
+      const status = await googleAuthCompleteManual({
+        sessionId: manualAuthChallenge.sessionId,
+        callbackUrlOrCode: manualAuthInput.trim(),
+      });
+      setAuth(status);
+      setManualAuthVisible(false);
+      setManualAuthChallenge(null);
+      setManualAuthInput("");
+      setMessage(`Signed in${status.email ? ` as ${status.email}` : ""}`);
+    } catch (error) {
+      setManualAuthError(String(error));
+      setMessage(`Manual sign-in failed: ${String(error)}`);
+    } finally {
+      setManualAuthBusy(false);
+    }
+  }
+
   async function handleSaveSettings() {
     setSavingSettings(true);
     try {
-      const saved = await saveSettings(settings);
+      const payload: RuntimeSettingsUpdate = {
+        tesseractPath: settings.tesseractPath,
+        maxConcurrentRequests: settings.maxConcurrentRequests,
+        spreadsheetBatchSize: settings.spreadsheetBatchSize,
+        maxRetries: settings.maxRetries,
+        retryDelaySeconds: settings.retryDelaySeconds,
+        jobRetentionHours: settings.jobRetentionHours,
+      };
+      const saved = await saveSettings(payload);
       setSettings(saved);
       setMessage("Settings saved");
     } catch (error) {
@@ -248,26 +358,45 @@ function App() {
         </div>
         <div className="topbar-status">
           <span className={`chip ${auth.signedIn ? "chip-ok" : "chip-muted"}`}>
-            {auth.signedIn ? `Google: ${auth.email ?? "Signed In"}` : "Google: Signed Out"}
+            {auth.signedIn
+              ? `Google: ${auth.email ?? "Signed In"}`
+              : "Google: Signed Out"}
           </span>
           <span className="chip chip-muted">{progressText}</span>
         </div>
       </header>
 
       <aside className="sidebar">
-        <button className={tab === "dashboard" ? "nav active" : "nav"} onClick={() => setTab("dashboard")}>
+        <button
+          className={tab === "dashboard" ? "nav active" : "nav"}
+          onClick={() => setTab("dashboard")}
+        >
           Dashboard
         </button>
-        <button className={tab === "jobs" ? "nav active" : "nav"} onClick={() => setTab("jobs")}>
+        <button
+          className={tab === "jobs" ? "nav active" : "nav"}
+          onClick={() => setTab("jobs")}
+        >
           Jobs
         </button>
-        <button className={tab === "settings" ? "nav active" : "nav"} onClick={() => setTab("settings")}>
+        <button
+          className={tab === "settings" ? "nav active" : "nav"}
+          onClick={() => setTab("settings")}
+        >
           Settings
         </button>
 
         <div className="sidebar-footer">
-          <button className="secondary" disabled={busyAuth} onClick={auth.signedIn ? handleSignOut : handleSignIn}>
-            {busyAuth ? "Working..." : auth.signedIn ? "Sign Out Google" : "Sign In Google"}
+          <button
+            className="secondary"
+            disabled={busyAuth}
+            onClick={auth.signedIn ? handleSignOut : handleSignIn}
+          >
+            {busyAuth
+              ? "Working..."
+              : auth.signedIn
+                ? "Sign Out Google"
+                : "Sign In Google"}
           </button>
           <button className="secondary" onClick={() => void refreshJobs()}>
             {loadingJobs ? "Refreshing..." : "Refresh Jobs"}
@@ -276,6 +405,74 @@ function App() {
       </aside>
 
       <main className="content">
+        {manualAuthVisible && (
+          <section className="card auth-card">
+            <h2>Manual Google Sign-In</h2>
+            <p>
+              {manualAuthReason ||
+                "Use this fallback when automatic browser callback cannot complete."}
+            </p>
+
+            <div className="auth-actions">
+              <button
+                className="secondary"
+                disabled={manualAuthBusy}
+                onClick={() => void handleBeginManualAuth(false)}
+              >
+                {manualAuthBusy ? "Preparing..." : "Generate Challenge"}
+              </button>
+              <button
+                className="primary"
+                disabled={!manualAuthChallenge || manualAuthBusy}
+                onClick={() => void handleOpenManualAuthUrl()}
+              >
+                Open Google Consent
+              </button>
+            </div>
+
+            {manualAuthChallenge && (
+              <div className="auth-meta">
+                <ResultRow label="Session ID" value={manualAuthChallenge.sessionId} />
+                <ResultRow label="Redirect URI" value={manualAuthChallenge.redirectUri} />
+                <ResultRow
+                  label="Expires"
+                  value={formatDateTime(manualAuthChallenge.expiresAt)}
+                />
+              </div>
+            )}
+
+            <label className="field">
+              <span>Callback URL or Authorization Code</span>
+              <input
+                value={manualAuthInput}
+                onChange={(event) => setManualAuthInput(event.target.value)}
+                placeholder="Paste callback URL from browser or code"
+              />
+            </label>
+
+            {manualAuthError && <p className="alert-error">{manualAuthError}</p>}
+
+            <div className="auth-actions">
+              <button
+                className="primary"
+                disabled={manualAuthBusy}
+                onClick={() => void handleCompleteManualAuth()}
+              >
+                {manualAuthBusy ? "Verifying..." : "Complete Manual Sign-In"}
+              </button>
+              <button
+                className="secondary"
+                onClick={() => {
+                  setManualAuthVisible(false);
+                  setManualAuthError("");
+                }}
+              >
+                Close
+              </button>
+            </div>
+          </section>
+        )}
+
         {tab === "dashboard" && (
           <section className="grid-two">
             <article className="card">
@@ -287,11 +484,17 @@ function App() {
                 <input
                   type="file"
                   accept=".pdf,.docx"
-                  onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
+                  onChange={(event) =>
+                    setSelectedFile(event.target.files?.[0] ?? null)
+                  }
                 />
               </label>
 
-              <button className="primary" disabled={parseLoading} onClick={() => void handleParseSingle()}>
+              <button
+                className="primary"
+                disabled={parseLoading}
+                onClick={() => void handleParseSingle()}
+              >
                 {parseLoading ? "Parsing..." : "Parse Resume"}
               </button>
 
@@ -302,7 +505,10 @@ function App() {
                   <ResultRow label="Phone" value={parseResult.phone} />
                   <ResultRow label="LinkedIn" value={parseResult.linkedIn} />
                   <ResultRow label="GitHub" value={parseResult.gitHub} />
-                  <ResultRow label="Confidence" value={parseResult.confidence.toFixed(2)} />
+                  <ResultRow
+                    label="Confidence"
+                    value={parseResult.confidence.toFixed(2)}
+                  />
                   <ResultRow
                     label="Errors"
                     value={
@@ -321,7 +527,11 @@ function App() {
 
               <label className="field">
                 <span>Drive Folder ID</span>
-                <input value={folderId} onChange={(e) => setFolderId(e.target.value)} placeholder="Folder ID" />
+                <input
+                  value={folderId}
+                  onChange={(e) => setFolderId(e.target.value)}
+                  placeholder="Folder ID"
+                />
               </label>
 
               <label className="field">
@@ -334,13 +544,18 @@ function App() {
               </label>
 
               <div className="button-row">
-                <button className="primary" onClick={() => void handleStartBatchJob()}>
+                <button
+                  className="primary"
+                  onClick={() => void handleStartBatchJob()}
+                >
                   Start Batch Job
                 </button>
                 <button
                   className="secondary"
                   disabled={!activeJobId}
-                  onClick={() => (activeJobId ? void refreshStatus(activeJobId, true) : undefined)}
+                  onClick={() =>
+                    activeJobId ? void refreshStatus(activeJobId, true) : undefined
+                  }
                 >
                   Refresh Status
                 </button>
@@ -348,10 +563,19 @@ function App() {
 
               {activeJobId && (
                 <div className="job-box">
-                  <p><strong>Active Job:</strong> {activeJobId}</p>
-                  <p><strong>Status:</strong> {jobStatus?.status ?? "-"}</p>
-                  <p><strong>Progress:</strong> {jobStatus?.progress ?? 0}%</p>
-                  <button className="danger" onClick={() => void handleCancelActiveJob()}>
+                  <p>
+                    <strong>Active Job:</strong> {activeJobId}
+                  </p>
+                  <p>
+                    <strong>Status:</strong> {jobStatus?.status ?? "-"}
+                  </p>
+                  <p>
+                    <strong>Progress:</strong> {jobStatus?.progress ?? 0}%
+                  </p>
+                  <button
+                    className="danger"
+                    onClick={() => void handleCancelActiveJob()}
+                  >
                     Cancel Active Job
                   </button>
                 </div>
@@ -369,7 +593,11 @@ function App() {
               <div className="jobs-list">
                 {jobs.length === 0 && <p>No jobs yet.</p>}
                 {jobs.map((jobId) => (
-                  <button key={jobId} className="job-item" onClick={() => void refreshStatus(jobId, false)}>
+                  <button
+                    key={jobId}
+                    className="job-item"
+                    onClick={() => void refreshStatus(jobId, false)}
+                  >
                     {jobId}
                   </button>
                 ))}
@@ -386,9 +614,18 @@ function App() {
                       value={`${jobStatus.progress}% (${jobStatus.processedFiles}/${jobStatus.totalFiles})`}
                     />
                     <ResultRow label="Spreadsheet" value={jobStatus.spreadsheetId} />
-                    <ResultRow label="Created" value={formatDateTime(jobStatus.createdAt)} />
-                    <ResultRow label="Started" value={formatDateTime(jobStatus.startedAt)} />
-                    <ResultRow label="Completed" value={formatDateTime(jobStatus.completedAt)} />
+                    <ResultRow
+                      label="Created"
+                      value={formatDateTime(jobStatus.createdAt)}
+                    />
+                    <ResultRow
+                      label="Started"
+                      value={formatDateTime(jobStatus.startedAt)}
+                    />
+                    <ResultRow
+                      label="Completed"
+                      value={formatDateTime(jobStatus.completedAt)}
+                    />
                     <ResultRow label="Error" value={jobStatus.error} />
                   </>
                 ) : (
@@ -432,30 +669,37 @@ function App() {
         {tab === "settings" && (
           <section className="card settings-card">
             <h2>Settings</h2>
-            <p>Google OAuth and local runtime tuning.</p>
+            <p>Runtime tuning. Google OAuth is managed by this app build.</p>
+
+            <div className="notice notice-info">
+              End users only use Sign In / Sign Out. OAuth client credentials are
+              bundled by Dipesh.
+            </div>
+
+            {!settings.googleClientId.trim() && (
+              <div className="notice notice-warning">
+                This build is missing OAuth client configuration
+                (`SOURCESTACK_GOOGLE_CLIENT_ID`).
+              </div>
+            )}
 
             <div className="settings-grid">
-              <label className="field">
-                <span>Google Client ID</span>
-                <input
-                  value={settings.googleClientId}
-                  onChange={(e) => setSettings({ ...settings, googleClientId: e.target.value })}
-                />
-              </label>
-
-              <label className="field">
-                <span>Google Client Secret</span>
-                <input
-                  value={settings.googleClientSecret}
-                  onChange={(e) => setSettings({ ...settings, googleClientSecret: e.target.value })}
-                />
-              </label>
+              <div className="field">
+                <span>OAuth Secret Status</span>
+                <div className="secret-pill">
+                  {settings.googleClientSecretConfigured
+                    ? "Configured"
+                    : "Not configured (only needed for clients that require secret)"}
+                </div>
+              </div>
 
               <label className="field">
                 <span>Tesseract Path</span>
                 <input
                   value={settings.tesseractPath}
-                  onChange={(e) => setSettings({ ...settings, tesseractPath: e.target.value })}
+                  onChange={(e) =>
+                    setSettings({ ...settings, tesseractPath: e.target.value })
+                  }
                 />
               </label>
 
@@ -536,7 +780,11 @@ function App() {
               </label>
             </div>
 
-            <button className="primary" disabled={savingSettings} onClick={() => void handleSaveSettings()}>
+            <button
+              className="primary"
+              disabled={savingSettings}
+              onClick={() => void handleSaveSettings()}
+            >
               {savingSettings ? "Saving..." : "Save Settings"}
             </button>
           </section>
@@ -548,11 +796,19 @@ function App() {
   );
 }
 
-function ResultRow({ label, value }: { label: string; value?: string | number | null }) {
+function ResultRow({
+  label,
+  value,
+}: {
+  label: string;
+  value?: string | number | null;
+}) {
   return (
     <div className="result-row">
       <span>{label}</span>
-      <strong>{value !== undefined && value !== null && value !== "" ? String(value) : "-"}</strong>
+      <strong>
+        {value !== undefined && value !== null && value !== "" ? String(value) : "-"}
+      </strong>
     </div>
   );
 }

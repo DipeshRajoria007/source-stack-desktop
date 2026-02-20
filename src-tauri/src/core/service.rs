@@ -11,16 +11,18 @@ use uuid::Uuid;
 
 use super::auth::GoogleAuthService;
 use super::document_parser::ResumeDocumentParser;
-use super::errors::CoreError;
+use super::errors::{AuthErrorCode, CoreError};
 use super::google_drive::GoogleDriveClient;
 use super::google_sheets::GoogleSheetsClient;
 use super::job_store::JsonJobStore;
 use super::models::{
-    AuthStatus, BatchParseRequest, DriveFileRef, JobProcessingState, JobStatus, ParsedCandidate,
-    RuntimeSettings,
+    AuthStatus, BatchParseRequest, DriveFileRef, GoogleSignInResult, JobProcessingState, JobStatus,
+    ManualAuthChallenge, ManualAuthCompleteRequest, ParsedCandidate, RuntimeSettings,
+    RuntimeSettingsUpdate, RuntimeSettingsView,
 };
 use super::ocr::TesseractCliOcrService;
 use super::pdf::PdfTextExtractor;
+use super::secret_store::GoogleClientSecretStore;
 use super::settings_store::SettingsStore;
 
 const HEADER_COLUMNS: [&str; 6] = [
@@ -39,7 +41,9 @@ struct BatchJobWorkItem {
 
 pub struct CoreService {
     settings_store: SettingsStore,
+    client_secret_store: GoogleClientSecretStore,
     settings: RwLock<RuntimeSettings>,
+    legacy_secret_scrubbed: RwLock<bool>,
     auth: GoogleAuthService,
     drive: GoogleDriveClient,
     sheets: GoogleSheetsClient,
@@ -51,7 +55,24 @@ pub struct CoreService {
 impl CoreService {
     pub async fn new() -> anyhow::Result<Arc<Self>> {
         let settings_store = SettingsStore::new();
-        let settings = settings_store.load().await.unwrap_or_default();
+        let loaded = settings_store.load().await.unwrap_or_else(|_| {
+            super::settings_store::LoadSettingsResult {
+                persisted: super::models::PersistedSettings::default(),
+                legacy_secret_scrubbed: false,
+            }
+        });
+        let client_secret_store = GoogleClientSecretStore::new();
+        let secret_from_keychain = client_secret_store.load().unwrap_or(None);
+        let secret = if let Some(secret) = secret_from_keychain {
+            Some(secret)
+        } else {
+            let embedded = super::models::default_google_client_secret();
+            if let Some(ref value) = embedded {
+                let _ = client_secret_store.save(value);
+            }
+            embedded
+        };
+        let settings = RuntimeSettings::from_parts(loaded.persisted.sanitized(), secret);
 
         let client = reqwest::Client::builder()
             .user_agent("SourceStackDesktop/1.0")
@@ -67,7 +88,9 @@ impl CoreService {
 
         let service = Arc::new(Self {
             settings_store,
+            client_secret_store,
             settings: RwLock::new(settings),
+            legacy_secret_scrubbed: RwLock::new(loaded.legacy_secret_scrubbed),
             auth,
             drive,
             sheets,
@@ -84,24 +107,46 @@ impl CoreService {
         Ok(service)
     }
 
-    pub async fn get_settings(&self) -> RuntimeSettings {
-        self.settings.read().await.clone()
+    pub async fn get_settings(&self) -> RuntimeSettingsView {
+        let settings = self.settings.read().await.clone();
+        let legacy_secret_scrubbed = *self.legacy_secret_scrubbed.read().await;
+        settings.to_view(legacy_secret_scrubbed)
     }
 
     pub async fn save_settings(
         &self,
-        mut new_settings: RuntimeSettings,
-    ) -> anyhow::Result<RuntimeSettings> {
-        new_settings.max_concurrent_requests = new_settings.max_concurrent_requests.max(1);
-        new_settings.spreadsheet_batch_size = new_settings.spreadsheet_batch_size.max(1);
-        new_settings.max_retries = new_settings.max_retries.max(1);
-        new_settings.retry_delay_seconds = new_settings.retry_delay_seconds.max(0.1);
-        new_settings.job_retention_hours = new_settings.job_retention_hours.max(1);
+        new_settings: RuntimeSettingsUpdate,
+    ) -> anyhow::Result<RuntimeSettingsView> {
+        let previous = self.settings.read().await.clone();
+        let mut runtime = RuntimeSettings {
+            google_client_id: new_settings
+                .google_client_id
+                .unwrap_or(previous.google_client_id.clone()),
+            google_client_secret: previous.google_client_secret.clone(),
+            tesseract_path: new_settings.tesseract_path,
+            max_concurrent_requests: new_settings.max_concurrent_requests.max(1),
+            spreadsheet_batch_size: new_settings.spreadsheet_batch_size.max(1),
+            max_retries: new_settings.max_retries.max(1),
+            retry_delay_seconds: new_settings.retry_delay_seconds.max(0.1),
+            job_retention_hours: new_settings.job_retention_hours.max(1),
+        };
 
-        self.settings_store.save(&new_settings).await?;
+        if let Some(secret_update) = new_settings.google_client_secret {
+            let trimmed = secret_update.trim();
+            if !trimmed.is_empty() {
+                self.client_secret_store.save(trimmed)?;
+                runtime.google_client_secret = Some(trimmed.to_string());
+                let mut scrubbed = self.legacy_secret_scrubbed.write().await;
+                *scrubbed = false;
+            }
+        }
+
+        self.settings_store.save(&runtime.to_persisted()).await?;
         let mut settings = self.settings.write().await;
-        *settings = new_settings.clone();
-        Ok(new_settings)
+        *settings = runtime.clone();
+
+        let legacy_secret_scrubbed = *self.legacy_secret_scrubbed.read().await;
+        Ok(runtime.to_view(legacy_secret_scrubbed))
     }
 
     pub async fn parse_single(
@@ -130,6 +175,27 @@ impl CoreService {
         if request.folder_id.trim().is_empty() {
             return Err(CoreError::InvalidRequest("FolderId is required".to_string()).into());
         }
+
+        let settings = self.settings.read().await.clone();
+        self.auth
+            .get_access_token_non_interactive(&settings)
+            .await
+            .map(|_| ())
+            .map_err(|err| {
+                if let Some(CoreError::Auth { code, .. }) = err.downcast_ref::<CoreError>() {
+                    if matches!(
+                        code,
+                        AuthErrorCode::SignInRequired | AuthErrorCode::ReauthRequired
+                    ) {
+                        return CoreError::auth(
+                            *code,
+                            "Google authentication required before starting a batch job.",
+                        )
+                        .into();
+                    }
+                }
+                err
+            })?;
 
         self.job_store.cleanup_expired_jobs().await?;
 
@@ -203,9 +269,22 @@ impl CoreService {
         Ok(false)
     }
 
-    pub async fn google_auth_sign_in(&self) -> anyhow::Result<AuthStatus> {
+    pub async fn google_auth_sign_in(&self) -> anyhow::Result<GoogleSignInResult> {
         let settings = self.settings.read().await.clone();
         self.auth.sign_in(&settings).await
+    }
+
+    pub async fn google_auth_begin_manual(&self) -> anyhow::Result<ManualAuthChallenge> {
+        let settings = self.settings.read().await.clone();
+        self.auth.begin_manual_sign_in(&settings).await
+    }
+
+    pub async fn google_auth_complete_manual(
+        &self,
+        request: ManualAuthCompleteRequest,
+    ) -> anyhow::Result<AuthStatus> {
+        let settings = self.settings.read().await.clone();
+        self.auth.complete_manual_sign_in(&settings, request).await
     }
 
     pub fn google_auth_sign_out(&self) -> anyhow::Result<()> {
@@ -370,7 +449,7 @@ impl CoreService {
             })
             .await?;
 
-        let access_token = self.auth.get_access_token(settings).await?;
+        let access_token = self.auth.get_access_token_non_interactive(settings).await?;
         let drive_files = self
             .drive
             .list_resume_files(&access_token, &work_item.request.folder_id)

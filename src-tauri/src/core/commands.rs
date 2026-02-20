@@ -5,7 +5,8 @@ use base64::Engine;
 use tauri::State;
 
 use super::models::{
-    AuthStatus, BatchParseRequest, CommandOk, JobStatus, ParsedCandidate, RuntimeSettings,
+    AuthStatus, BatchParseRequest, CommandOk, GoogleSignInResult, JobStatus, ManualAuthChallenge,
+    ManualAuthCompleteRequest, ParsedCandidate, RuntimeSettingsUpdate, RuntimeSettingsView,
     StartJobResponse,
 };
 use super::service::CoreService;
@@ -86,10 +87,33 @@ pub async fn cancel_job(state: State<'_, AppState>, job_id: String) -> Result<Co
 }
 
 #[tauri::command]
-pub async fn google_auth_sign_in(state: State<'_, AppState>) -> Result<AuthStatus, String> {
+pub async fn google_auth_sign_in(state: State<'_, AppState>) -> Result<GoogleSignInResult, String> {
     state
         .core
         .google_auth_sign_in()
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub async fn google_auth_begin_manual(
+    state: State<'_, AppState>,
+) -> Result<ManualAuthChallenge, String> {
+    state
+        .core
+        .google_auth_begin_manual()
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub async fn google_auth_complete_manual(
+    state: State<'_, AppState>,
+    request: ManualAuthCompleteRequest,
+) -> Result<AuthStatus, String> {
+    state
+        .core
+        .google_auth_complete_manual(request)
         .await
         .map_err(|err| err.to_string())
 }
@@ -113,15 +137,15 @@ pub fn google_auth_status(state: State<'_, AppState>) -> Result<AuthStatus, Stri
 }
 
 #[tauri::command]
-pub async fn get_settings(state: State<'_, AppState>) -> Result<RuntimeSettings, String> {
+pub async fn get_settings(state: State<'_, AppState>) -> Result<RuntimeSettingsView, String> {
     Ok(state.core.get_settings().await)
 }
 
 #[tauri::command]
 pub async fn save_settings(
     state: State<'_, AppState>,
-    settings: RuntimeSettings,
-) -> Result<RuntimeSettings, String> {
+    settings: RuntimeSettingsUpdate,
+) -> Result<RuntimeSettingsView, String> {
     state
         .core
         .save_settings(settings)

@@ -37,9 +37,19 @@ export interface JobStatus {
   durationSeconds?: number | null;
 }
 
-export interface RuntimeSettings {
+export interface RuntimeSettingsView {
   googleClientId: string;
-  googleClientSecret: string;
+  googleClientSecretConfigured: boolean;
+  legacySecretScrubbed: boolean;
+  tesseractPath: string;
+  maxConcurrentRequests: number;
+  spreadsheetBatchSize: number;
+  maxRetries: number;
+  retryDelaySeconds: number;
+  jobRetentionHours: number;
+}
+
+export interface RuntimeSettingsUpdate {
   tesseractPath: string;
   maxConcurrentRequests: number;
   spreadsheetBatchSize: number;
@@ -52,6 +62,30 @@ export interface AuthStatus {
   signedIn: boolean;
   email?: string | null;
   expiresAt?: string | null;
+}
+
+export type GoogleSignInResult =
+  | {
+      state: "signed_in";
+      status: AuthStatus;
+    }
+  | {
+      state: "manual_required";
+      reason: string;
+      message: string;
+    };
+
+export interface ManualAuthChallenge {
+  sessionId: string;
+  authorizeUrl: string;
+  redirectUri: string;
+  expiresAt: string;
+  instructions: string;
+}
+
+export interface ManualAuthCompleteRequest {
+  sessionId: string;
+  callbackUrlOrCode: string;
 }
 
 export interface StartJobResponse {

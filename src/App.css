@@ -143,6 +143,36 @@ body,
   font-size: 0.9rem;
 }
 
+.auth-card {
+  margin-bottom: 12px;
+  border-color: rgba(208, 222, 255, 0.4);
+  background:
+    linear-gradient(145deg, rgba(20, 33, 53, 0.92), rgba(14, 23, 37, 0.92)),
+    radial-gradient(circle at 12% 24%, rgba(153, 194, 255, 0.2), transparent 46%);
+}
+
+.auth-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.auth-meta {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.alert-error {
+  margin: 8px 0;
+  color: #ffd3d3;
+  background: rgba(162, 56, 56, 0.28);
+  border: 1px solid rgba(255, 174, 174, 0.35);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 0.85rem;
+}
+
 .field {
   display: grid;
   gap: 6px;
@@ -292,6 +322,34 @@ th {
   grid-template-columns: repeat(2, minmax(220px, 1fr));
   gap: 10px 12px;
   margin-bottom: 10px;
+}
+
+.secret-pill {
+  border: 1px solid rgba(183, 208, 244, 0.35);
+  background: rgba(18, 29, 47, 0.72);
+  border-radius: 9px;
+  padding: 9px 11px;
+  font-size: 0.86rem;
+  color: var(--text-primary);
+}
+
+.notice {
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  font-size: 0.87rem;
+}
+
+.notice-warning {
+  border: 1px solid rgba(245, 203, 120, 0.45);
+  background: rgba(97, 69, 21, 0.35);
+  color: #ffe2a9;
+}
+
+.notice-info {
+  border: 1px solid rgba(145, 191, 255, 0.42);
+  background: rgba(31, 56, 95, 0.34);
+  color: #d2e7ff;
 }
 
 .statusbar {

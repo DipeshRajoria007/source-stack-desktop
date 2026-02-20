@@ -80,6 +80,16 @@ The current desktop app keeps SourceStack parsing/orchestration behavior:
 - Rust (stable toolchain)
 - Tesseract OCR installed and available in `PATH` (needed for scanned PDFs)
 
+## OAuth Owner Configuration (App Builder Only)
+
+End users do not configure Google Cloud credentials in the app.  
+Set these at build time (or in your shell before `pnpm tauri dev/build`):
+
+```bash
+export SOURCESTACK_GOOGLE_CLIENT_ID="your_desktop_oauth_client_id.apps.googleusercontent.com"
+export SOURCESTACK_GOOGLE_CLIENT_SECRET="optional_if_required_by_your_client"
+```
+
 ## Run Dev Mode (macOS/Windows)
 
 ```bash

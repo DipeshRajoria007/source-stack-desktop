@@ -3,9 +3,13 @@ import type {
   AuthStatus,
   BatchParseRequest,
   CommandOk,
+  GoogleSignInResult,
   JobStatus,
+  ManualAuthChallenge,
+  ManualAuthCompleteRequest,
   ParsedCandidate,
-  RuntimeSettings,
+  RuntimeSettingsUpdate,
+  RuntimeSettingsView,
   StartJobResponse,
 } from "./types";
 
@@ -41,8 +45,18 @@ export async function cancelJob(jobId: string): Promise<CommandOk> {
   return invoke<CommandOk>("cancel_job", { jobId });
 }
 
-export async function googleAuthSignIn(): Promise<AuthStatus> {
-  return invoke<AuthStatus>("google_auth_sign_in");
+export async function googleAuthSignIn(): Promise<GoogleSignInResult> {
+  return invoke<GoogleSignInResult>("google_auth_sign_in");
+}
+
+export async function googleAuthBeginManual(): Promise<ManualAuthChallenge> {
+  return invoke<ManualAuthChallenge>("google_auth_begin_manual");
+}
+
+export async function googleAuthCompleteManual(
+  request: ManualAuthCompleteRequest,
+): Promise<AuthStatus> {
+  return invoke<AuthStatus>("google_auth_complete_manual", { request });
 }
 
 export async function googleAuthSignOut(): Promise<CommandOk> {
@@ -53,12 +67,12 @@ export async function googleAuthStatus(): Promise<AuthStatus> {
   return invoke<AuthStatus>("google_auth_status");
 }
 
-export async function getSettings(): Promise<RuntimeSettings> {
-  return invoke<RuntimeSettings>("get_settings");
+export async function getSettings(): Promise<RuntimeSettingsView> {
+  return invoke<RuntimeSettingsView>("get_settings");
 }
 
 export async function saveSettings(
-  settings: RuntimeSettings,
-): Promise<RuntimeSettings> {
-  return invoke<RuntimeSettings>("save_settings", { settings });
+  settings: RuntimeSettingsUpdate,
+): Promise<RuntimeSettingsView> {
+  return invoke<RuntimeSettingsView>("save_settings", { settings });
 }

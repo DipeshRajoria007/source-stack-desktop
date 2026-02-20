@@ -9,5 +9,6 @@ pub mod job_store;
 pub mod models;
 pub mod ocr;
 pub mod pdf;
+pub mod secret_store;
 pub mod service;
 pub mod settings_store;
