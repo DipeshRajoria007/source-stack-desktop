@@ -1,0 +1,96 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap");
+@import "tailwindcss";
+
+@source "../**/*.{ts,tsx}";
+
+:root {
+  color-scheme: dark;
+  --app-bg: #0b0e14;
+  --app-panel: #111520;
+  --app-panel-strong: #0d1117;
+  --app-muted-panel: #151a28;
+  --app-foreground: #e2e8f0;
+  --app-muted: #64748b;
+  --app-subtle: #475569;
+  --app-border: rgba(255, 255, 255, 0.08);
+  --app-border-strong: rgba(255, 255, 255, 0.12);
+  --app-primary: #2dd4bf;
+  --app-primary-soft: rgba(45, 212, 191, 0.14);
+  --app-success: #22c55e;
+  --app-warning: #f59e0b;
+  --app-danger: #ef4444;
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  html,
+  body,
+  #root {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    background:
+      radial-gradient(circle at top left, rgba(45, 212, 191, 0.08), transparent 32%),
+      radial-gradient(circle at bottom right, rgba(59, 130, 246, 0.08), transparent 26%),
+      var(--app-bg);
+    color: var(--app-foreground);
+    font-family: "Inter", "SF Pro Text", -apple-system, BlinkMacSystemFont, sans-serif;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+
+  button,
+  input,
+  textarea {
+    font: inherit;
+  }
+
+  button {
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  ::selection {
+    background: rgba(45, 212, 191, 0.22);
+  }
+}
+
+@layer utilities {
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(100, 116, 139, 0.55) transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: rgba(100, 116, 139, 0.45);
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background-clip: padding-box;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .panel-surface {
+    background: var(--app-panel);
+    border: 1px solid var(--app-border);
+  }
+
+  .surface-muted {
+    background: var(--app-muted-panel);
+    border: 1px solid var(--app-border);
+  }
+}

@@ -1,9 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import "./App.css";
-import { DriveFolderBrowser } from "./components/DriveFolderBrowser";
+
+import { AppShell } from "./components/AppShell";
+import type { AppView, StatusTone } from "./components/AppShell";
+import { DashboardView } from "./components/DashboardView";
+import { JobsView } from "./components/JobsView";
+import { SettingsView } from "./components/SettingsView";
 import {
   cancelJob,
+  getDriveFolderPath,
   getJobResults,
   getJobStatus,
   getSettings,
@@ -12,6 +17,8 @@ import {
   googleAuthSignIn,
   googleAuthSignOut,
   googleAuthStatus,
+  listDriveFiles,
+  listDriveFolders,
   listJobs,
   parseSingle,
   saveSettings,
@@ -19,15 +26,48 @@ import {
 } from "./lib/api";
 import type {
   AuthStatus,
+  DriveBrowserFile,
+  DriveFolderEntry,
+  DrivePathEntry,
   JobStatus,
   ManualAuthChallenge,
   ParsedCandidate,
-  RuntimeSettingsUpdate,
   RuntimeSettingsView,
 } from "./lib/types";
-import { arrayBufferToBase64, formatDateTime } from "./lib/utils";
+import {
+  arrayBufferToBase64,
+  isSupportedResumeFile,
+  isSupportedResumeFileName,
+  isTerminalJobState,
+  sortTimestampForJob,
+  truncateMiddle,
+} from "./lib/utils";
 
-type TabKey = "dashboard" | "jobs" | "settings";
+interface DriveBrowserState {
+  currentFolderId: string | null;
+  error: string | null;
+  files: DriveBrowserFile[];
+  folders: DriveFolderEntry[];
+  loading: boolean;
+  path: DrivePathEntry[];
+}
+
+interface SelectedDriveFolder {
+  id: string;
+  loadingCount: boolean;
+  name: string;
+  resumeCount: number | null;
+}
+
+interface JobListItem {
+  sortTimestamp: number;
+  status: JobStatus;
+}
+
+interface WorkspaceStatus {
+  text: string;
+  tone: StatusTone;
+}
 
 const defaultSettings: RuntimeSettingsView = {
   googleClientId: "",
@@ -41,154 +81,362 @@ const defaultSettings: RuntimeSettingsView = {
   jobRetentionHours: 24,
 };
 
-function App() {
-  const [tab, setTab] = useState<TabKey>("dashboard");
-  const [message, setMessage] = useState("Ready");
+const emptyDriveState: DriveBrowserState = {
+  currentFolderId: null,
+  error: null,
+  files: [],
+  folders: [],
+  loading: false,
+  path: [],
+};
+
+export default function App() {
+  const [activeView, setActiveView] = useState<AppView>("dashboard");
+  const [workspaceStatus, setWorkspaceStatus] = useState<WorkspaceStatus>({
+    text: "Workspace ready",
+    tone: "neutral",
+  });
+  const [workspaceRefreshing, setWorkspaceRefreshing] = useState(false);
 
   const [settings, setSettings] = useState<RuntimeSettingsView>(defaultSettings);
+  const [savingSettings, setSavingSettings] = useState(false);
+
   const [auth, setAuth] = useState<AuthStatus>({ signedIn: false });
+  const [busyAuth, setBusyAuth] = useState(false);
+
+  const [driveState, setDriveState] = useState<DriveBrowserState>(emptyDriveState);
+  const [selectedDriveFolder, setSelectedDriveFolder] =
+    useState<SelectedDriveFolder | null>(null);
+  const [spreadsheetId, setSpreadsheetId] = useState("");
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [parseLoading, setParseLoading] = useState(false);
   const [parseResult, setParseResult] = useState<ParsedCandidate | null>(null);
+  const [parseDragActive, setParseDragActive] = useState(false);
 
-  const [selectedDriveFolder, setSelectedDriveFolder] = useState<{
-    id: string;
-    name: string;
-  } | null>(null);
-  const [spreadsheetId, setSpreadsheetId] = useState("");
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
-  const [jobStatus, setJobStatus] = useState<JobStatus | null>(null);
-  const [jobResults, setJobResults] = useState<ParsedCandidate[]>([]);
-  const [jobs, setJobs] = useState<string[]>([]);
-  const [loadingJobs, setLoadingJobs] = useState(false);
-
-  const [busyAuth, setBusyAuth] = useState(false);
-  const [savingSettings, setSavingSettings] = useState(false);
+  const [activeJobStatus, setActiveJobStatus] = useState<JobStatus | null>(null);
+  const [jobs, setJobs] = useState<JobListItem[]>([]);
+  const [jobsLoading, setJobsLoading] = useState(false);
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const [selectedJobResults, setSelectedJobResults] = useState<ParsedCandidate[]>([]);
+  const [selectedJobResultsLoading, setSelectedJobResultsLoading] = useState(false);
+  const [selectedJobResultsError, setSelectedJobResultsError] = useState<string | null>(null);
 
   const [manualAuthVisible, setManualAuthVisible] = useState(false);
   const [manualAuthReason, setManualAuthReason] = useState("");
   const [manualAuthChallenge, setManualAuthChallenge] =
     useState<ManualAuthChallenge | null>(null);
   const [manualAuthInput, setManualAuthInput] = useState("");
-  const [manualAuthBusy, setManualAuthBusy] = useState(false);
   const [manualAuthError, setManualAuthError] = useState("");
+  const [manualAuthBusy, setManualAuthBusy] = useState(false);
+
+  const driveRequestIdRef = useRef(0);
+  const folderCountRequestIdRef = useRef(0);
+  const selectedJobResultsRequestIdRef = useRef(0);
+
+  const driveBrowsingLocked = Boolean(
+    activeJobId && (!activeJobStatus || !isTerminalJobState(activeJobStatus.status)),
+  );
+
+  const selectedJobStatus = useMemo(() => {
+    if (selectedJobId === activeJobStatus?.jobId) {
+      return activeJobStatus;
+    }
+
+    return jobs.find((item) => item.status.jobId === selectedJobId)?.status ?? null;
+  }, [activeJobStatus, jobs, selectedJobId]);
+
+  const centerLabel = useMemo(() => {
+    if (activeView === "jobs" && selectedJobId) {
+      return `Jobs -> ${truncateMiddle(selectedJobId, 22)}`;
+    }
+
+    if (activeView === "settings") {
+      return "Settings";
+    }
+
+    if (selectedDriveFolder) {
+      return `Dashboard -> ${truncateMiddle(selectedDriveFolder.name, 24)}`;
+    }
+
+    return "Dashboard";
+  }, [activeView, selectedDriveFolder, selectedJobId]);
 
   useEffect(() => {
-    void bootstrap();
+    void refreshWorkspace(false);
   }, []);
 
   useEffect(() => {
-    if (!activeJobId) {
+    if (workspaceStatus.tone === "neutral" || workspaceStatus.tone === "error") {
       return;
     }
 
-    const interval = setInterval(() => {
-      void refreshStatus(activeJobId, false);
-    }, 2000);
+    const timer = window.setTimeout(() => {
+      setWorkspaceStatus({ text: "Workspace ready", tone: "neutral" });
+    }, 3600);
 
-    return () => clearInterval(interval);
-  }, [activeJobId]);
+    return () => window.clearTimeout(timer);
+  }, [workspaceStatus]);
 
   useEffect(() => {
-    if (auth.signedIn) {
+    if (!auth.signedIn) {
+      setDriveState(emptyDriveState);
+      setSelectedDriveFolder(null);
+    }
+  }, [auth.signedIn]);
+
+  useEffect(() => {
+    if (!selectedDriveFolder) {
       return;
     }
 
-    setSelectedDriveFolder(null);
-  }, [auth.signedIn]);
-
-  const progressText = useMemo(() => {
-    if (!jobStatus) {
-      return "No active job";
+    if (selectedDriveFolder.id !== driveState.currentFolderId) {
+      return;
     }
 
-    return `${jobStatus.status} • ${jobStatus.progress}% • ${jobStatus.processedFiles}/${jobStatus.totalFiles} files`;
-  }, [jobStatus]);
+    const resumeCount = driveState.files.filter((file) => isSupportedResumeFile(file)).length;
+    setSelectedDriveFolder((current) =>
+      current && current.id === selectedDriveFolder.id
+        ? { ...current, loadingCount: false, resumeCount }
+        : current,
+    );
+  }, [driveState.currentFolderId, driveState.files, selectedDriveFolder]);
 
-  const driveBrowsingLocked = Boolean(
-    activeJobId &&
-      (!jobStatus ||
-        (jobStatus.status !== "completed" &&
-          jobStatus.status !== "failed" &&
-          jobStatus.status !== "revoked")),
-  );
+  useEffect(() => {
+    if (!activeJobId || !activeJobStatus || isTerminalJobState(activeJobStatus.status)) {
+      return;
+    }
 
-  async function bootstrap() {
-    let loadedSettings = defaultSettings;
-    let initMessage = "Workspace ready";
+    const interval = window.setInterval(() => {
+      void refreshActiveJobStatus(activeJobId, false);
+    }, 2000);
+
+    return () => window.clearInterval(interval);
+  }, [activeJobId, activeJobStatus]);
+
+  useEffect(() => {
+    if (!jobs.length) {
+      setSelectedJobId(null);
+      return;
+    }
+
+    setSelectedJobId((current) => {
+      if (current && jobs.some((item) => item.status.jobId === current)) {
+        return current;
+      }
+
+      if (activeJobId && jobs.some((item) => item.status.jobId === activeJobId)) {
+        return activeJobId;
+      }
+
+      return jobs[0]?.status.jobId ?? null;
+    });
+  }, [activeJobId, jobs]);
+
+  useEffect(() => {
+    if (!selectedJobId || !selectedJobStatus) {
+      setSelectedJobResults([]);
+      setSelectedJobResultsError(null);
+      setSelectedJobResultsLoading(false);
+      return;
+    }
+
+    const shouldLoadResults =
+      (selectedJobStatus.resultsCount ?? 0) > 0 || selectedJobStatus.processedFiles > 0;
+
+    if (!shouldLoadResults) {
+      setSelectedJobResults([]);
+      setSelectedJobResultsError(null);
+      setSelectedJobResultsLoading(false);
+      return;
+    }
+
+    const requestId = ++selectedJobResultsRequestIdRef.current;
+    setSelectedJobResultsLoading(true);
+    setSelectedJobResultsError(null);
+
+    void getJobResults(selectedJobId)
+      .then((results) => {
+        if (selectedJobResultsRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        setSelectedJobResults(results);
+      })
+      .catch((error) => {
+        if (selectedJobResultsRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        setSelectedJobResults([]);
+        setSelectedJobResultsError(String(error));
+      })
+      .finally(() => {
+        if (selectedJobResultsRequestIdRef.current === requestId) {
+          setSelectedJobResultsLoading(false);
+        }
+      });
+  }, [selectedJobId, selectedJobStatus]);
+
+  async function refreshWorkspace(showSuccessMessage: boolean) {
+    setWorkspaceRefreshing(true);
+    const errors: string[] = [];
 
     try {
-      loadedSettings = await getSettings();
-      setSettings(loadedSettings);
-    } catch (error) {
-      initMessage = `Failed to load settings: ${String(error)}`;
+      try {
+        const loadedSettings = await getSettings();
+        setSettings(loadedSettings);
+      } catch (error) {
+        errors.push(`Settings refresh failed: ${String(error)}`);
+      }
+
+      let loadedAuth = auth;
+      try {
+        loadedAuth = await googleAuthStatus();
+        setAuth(loadedAuth);
+      } catch (error) {
+        errors.push(`Google session refresh failed: ${String(error)}`);
+      }
+
+      const jobsOk = await refreshJobsSummary(false);
+      if (!jobsOk) {
+        errors.push("Job history refresh failed.");
+      }
+
+      if (loadedAuth.signedIn) {
+        const driveOk = await loadDriveFolder(driveState.currentFolderId, loadedAuth.signedIn, false);
+        if (!driveOk) {
+          errors.push("Drive refresh failed.");
+        }
+      } else {
+        setDriveState(emptyDriveState);
+        setSelectedDriveFolder(null);
+      }
+
+      if (errors.length > 0) {
+        pushStatus(errors[0], "error");
+      } else if (showSuccessMessage) {
+        pushStatus("Workspace refreshed", "success");
+      }
+    } finally {
+      setWorkspaceRefreshing(false);
     }
-
-    try {
-      const loadedAuth = await googleAuthStatus();
-      setAuth(loadedAuth);
-    } catch (error) {
-      initMessage = `Failed to restore Google session: ${String(error)}`;
-    }
-
-    await refreshJobs();
-
-    if (!loadedSettings.googleClientId.trim()) {
-      initMessage =
-        "This app build is missing Google OAuth configuration. Contact Dipesh from engineering team.";
-    }
-
-    setMessage(initMessage);
   }
 
-  async function refreshJobs() {
-    setLoadingJobs(true);
+  async function refreshJobsSummary(showErrorMessage: boolean): Promise<boolean> {
+    setJobsLoading(true);
+
     try {
-      const ids = await listJobs();
-      setJobs(ids);
+      const jobIds = await listJobs();
+      const settledStatuses = await Promise.allSettled(jobIds.map((jobId) => getJobStatus(jobId)));
+      const nextJobs = settledStatuses
+        .flatMap((result) =>
+          result.status === "fulfilled"
+            ? [{ sortTimestamp: sortTimestampForJob(result.value), status: result.value }]
+            : [],
+        )
+        .sort((left, right) => right.sortTimestamp - left.sortTimestamp);
+
+      setJobs(nextJobs);
+      syncActiveJobFromSummaries(nextJobs);
+      return true;
     } catch (error) {
-      setMessage(`Failed to load jobs: ${String(error)}`);
+      if (showErrorMessage) {
+        pushStatus(`Failed to load jobs: ${String(error)}`, "error");
+      }
+
+      return false;
     } finally {
-      setLoadingJobs(false);
+      setJobsLoading(false);
+    }
+  }
+
+  async function loadDriveFolder(
+    folderId: string | null,
+    signedIn = auth.signedIn,
+    showErrorMessage = true,
+  ): Promise<boolean> {
+    if (!signedIn) {
+      setDriveState(emptyDriveState);
+      return true;
+    }
+
+    const requestId = ++driveRequestIdRef.current;
+    setDriveState((current) => ({ ...current, error: null, loading: true }));
+
+    try {
+      const [folders, files] = await Promise.all([
+        listDriveFolders(folderId ?? undefined),
+        folderId ? listDriveFiles(folderId) : Promise.resolve([]),
+      ]);
+      const path = folderId ? await getDriveFolderPath(folderId) : [];
+
+      if (driveRequestIdRef.current !== requestId) {
+        return false;
+      }
+
+      setDriveState({
+        currentFolderId: folderId,
+        error: null,
+        files,
+        folders,
+        loading: false,
+        path,
+      });
+      return true;
+    } catch (error) {
+      if (driveRequestIdRef.current === requestId) {
+        setDriveState((current) => ({
+          ...current,
+          error: String(error),
+          loading: false,
+        }));
+      }
+
+      if (showErrorMessage) {
+        pushStatus(`Drive load failed: ${String(error)}`, "error");
+      }
+
+      return false;
     }
   }
 
   async function handleParseSingle() {
     if (!selectedFile) {
-      setMessage("Choose a .pdf or .docx file first");
+      pushStatus("Choose a PDF or DOCX file first.", "error");
       return;
     }
 
-    const fileName = selectedFile.name.toLowerCase();
-    if (!fileName.endsWith(".pdf") && !fileName.endsWith(".docx")) {
-      setMessage("Only .pdf and .docx are supported");
+    if (!isSupportedResumeFileName(selectedFile.name)) {
+      pushStatus("Only .pdf and .docx files are supported.", "error");
       return;
     }
 
     setParseLoading(true);
-    setMessage("Parsing resume locally...");
+    pushStatus("Parsing resume locally…", "info");
 
     try {
-      const buffer = await selectedFile.arrayBuffer();
-      const encoded = arrayBufferToBase64(buffer);
+      const encoded = arrayBufferToBase64(await selectedFile.arrayBuffer());
       const result = await parseSingle(selectedFile.name, encoded);
       setParseResult(result);
-      setMessage("Local parse completed");
+      pushStatus("Local parse completed", "success");
     } catch (error) {
-      setMessage(`Parse failed: ${String(error)}`);
+      setParseResult(null);
+      pushStatus(`Parse failed: ${String(error)}`, "error");
     } finally {
       setParseLoading(false);
     }
   }
 
   async function handleStartBatchJob() {
-    if (!selectedDriveFolder?.id) {
-      setMessage("Select a Google Drive folder before starting a batch job.");
+    if (!selectedDriveFolder) {
+      pushStatus("Select a Drive folder before starting a batch job.", "error");
       return;
     }
 
-    setMessage("Queueing batch job...");
+    pushStatus("Queueing batch job…", "info");
+
     try {
       const response = await startBatchJob({
         folderId: selectedDriveFolder.id,
@@ -196,42 +444,35 @@ function App() {
       });
 
       setActiveJobId(response.jobId);
-      setJobResults([]);
-      setMessage(`Started job ${response.jobId}`);
-      await refreshJobs();
-      await refreshStatus(response.jobId, true);
+      setActiveJobStatus(null);
+      setSelectedJobId(response.jobId);
+      await refreshActiveJobStatus(response.jobId, true);
+      await refreshJobsSummary(false);
+      pushStatus(`Started job ${truncateMiddle(response.jobId, 18)}`, "success");
     } catch (error) {
       const text = String(error);
       if (text.toLowerCase().includes("authentication required")) {
-        setMessage("Google sign-in is required before starting a batch job.");
         setManualAuthVisible(true);
+        setManualAuthReason("Google sign-in is required before starting a batch job.");
+        pushStatus("Google sign-in is required before batch processing.", "error");
       } else {
-        setMessage(`Batch start failed: ${text}`);
+        pushStatus(`Batch start failed: ${text}`, "error");
       }
     }
   }
 
-  async function refreshStatus(jobId: string, focusJobsTab: boolean) {
+  async function refreshActiveJobStatus(jobId: string, refreshJobsAfter: boolean) {
     try {
       const status = await getJobStatus(jobId);
-      setJobStatus(status);
       setActiveJobId(jobId);
+      setActiveJobStatus(status);
+      upsertJobStatus(status);
 
-      if (focusJobsTab) {
-        setTab("jobs");
-      }
-
-      if (status.status === "completed") {
-        const results = await getJobResults(jobId);
-        setJobResults(results);
-        setMessage(`Job ${jobId} completed (${results.length} results)`);
-      } else if (status.status === "failed") {
-        setMessage(`Job ${jobId} failed: ${status.error ?? "unknown error"}`);
-      } else if (status.status === "revoked") {
-        setMessage(`Job ${jobId} canceled`);
+      if (refreshJobsAfter) {
+        await refreshJobsSummary(false);
       }
     } catch (error) {
-      setMessage(`Failed to get job status: ${String(error)}`);
+      pushStatus(`Failed to get job status: ${String(error)}`, "error");
     }
   }
 
@@ -243,16 +484,18 @@ function App() {
     try {
       const response = await cancelJob(activeJobId);
       if (response.ok) {
-        setMessage(`Cancel requested for ${activeJobId}`);
+        pushStatus(`Cancel requested for ${truncateMiddle(activeJobId, 18)}`, "info");
+        await refreshActiveJobStatus(activeJobId, true);
       }
     } catch (error) {
-      setMessage(`Cancel failed: ${String(error)}`);
+      pushStatus(`Cancel failed: ${String(error)}`, "error");
     }
   }
 
   async function handleSignIn() {
     setBusyAuth(true);
-    setMessage("Opening browser for Google sign-in...");
+    pushStatus("Opening browser for Google sign-in…", "info");
+
     try {
       const result = await googleAuthSignIn();
       if (result.state === "signed_in") {
@@ -261,15 +504,19 @@ function App() {
         setManualAuthChallenge(null);
         setManualAuthInput("");
         setManualAuthError("");
-        setMessage(`Signed in${result.status.email ? ` as ${result.status.email}` : ""}`);
+        await loadDriveFolder(driveState.currentFolderId, true, false);
+        pushStatus(
+          `Signed in${result.status.email ? ` as ${result.status.email}` : ""}`,
+          "success",
+        );
       } else {
         setManualAuthVisible(true);
         setManualAuthReason(result.message);
-        setMessage("Automatic callback did not finish. Use manual sign-in fallback.");
         await handleBeginManualAuth(true);
+        pushStatus("Automatic callback did not finish. Use manual sign-in fallback.", "error");
       }
     } catch (error) {
-      setMessage(`Google sign-in failed: ${String(error)}`);
+      pushStatus(`Google sign-in failed: ${String(error)}`, "error");
     } finally {
       setBusyAuth(false);
     }
@@ -277,6 +524,7 @@ function App() {
 
   async function handleSignOut() {
     setBusyAuth(true);
+
     try {
       await googleAuthSignOut();
       const status = await googleAuthStatus();
@@ -285,28 +533,31 @@ function App() {
       setManualAuthChallenge(null);
       setManualAuthInput("");
       setManualAuthError("");
-      setMessage("Signed out from Google");
+      setDriveState(emptyDriveState);
+      setSelectedDriveFolder(null);
+      pushStatus("Signed out from Google", "success");
     } catch (error) {
-      setMessage(`Sign-out failed: ${String(error)}`);
+      pushStatus(`Sign-out failed: ${String(error)}`, "error");
     } finally {
       setBusyAuth(false);
     }
   }
 
   async function handleBeginManualAuth(openImmediately: boolean) {
+    setManualAuthVisible(true);
     setManualAuthBusy(true);
     setManualAuthError("");
+
     try {
       const challenge = await googleAuthBeginManual();
       setManualAuthChallenge(challenge);
-      setManualAuthVisible(true);
       if (openImmediately) {
         await openUrl(challenge.authorizeUrl);
       }
-      setMessage("Manual sign-in challenge ready");
+      pushStatus("Manual sign-in challenge ready", "info");
     } catch (error) {
       setManualAuthError(String(error));
-      setMessage(`Failed to start manual sign-in: ${String(error)}`);
+      pushStatus(`Failed to start manual sign-in: ${String(error)}`, "error");
     } finally {
       setManualAuthBusy(false);
     }
@@ -321,6 +572,20 @@ function App() {
       await openUrl(manualAuthChallenge.authorizeUrl);
     } catch (error) {
       setManualAuthError(`Failed to open URL: ${String(error)}`);
+      pushStatus(`Failed to open URL: ${String(error)}`, "error");
+    }
+  }
+
+  async function handleCopyManualAuthUrl() {
+    if (!manualAuthChallenge) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(manualAuthChallenge.authorizeUrl);
+      pushStatus("Authorization URL copied", "success");
+    } catch (error) {
+      pushStatus(`Copy failed: ${String(error)}`, "error");
     }
   }
 
@@ -331,25 +596,28 @@ function App() {
     }
 
     if (!manualAuthInput.trim()) {
-      setManualAuthError("Paste callback URL or authorization code.");
+      setManualAuthError("Paste the callback URL or authorization code.");
       return;
     }
 
     setManualAuthBusy(true);
     setManualAuthError("");
+
     try {
       const status = await googleAuthCompleteManual({
-        sessionId: manualAuthChallenge.sessionId,
         callbackUrlOrCode: manualAuthInput.trim(),
+        sessionId: manualAuthChallenge.sessionId,
       });
+
       setAuth(status);
       setManualAuthVisible(false);
       setManualAuthChallenge(null);
       setManualAuthInput("");
-      setMessage(`Signed in${status.email ? ` as ${status.email}` : ""}`);
+      await loadDriveFolder(driveState.currentFolderId, true, false);
+      pushStatus(`Signed in${status.email ? ` as ${status.email}` : ""}`, "success");
     } catch (error) {
       setManualAuthError(String(error));
-      setMessage(`Manual sign-in failed: ${String(error)}`);
+      pushStatus(`Manual sign-in failed: ${String(error)}`, "error");
     } finally {
       setManualAuthBusy(false);
     }
@@ -357,669 +625,221 @@ function App() {
 
   async function handleSaveSettings() {
     setSavingSettings(true);
+
     try {
-      const payload: RuntimeSettingsUpdate = {
-        tesseractPath: settings.tesseractPath,
+      const saved = await saveSettings({
+        jobRetentionHours: settings.jobRetentionHours,
         maxConcurrentRequests: settings.maxConcurrentRequests,
-        spreadsheetBatchSize: settings.spreadsheetBatchSize,
         maxRetries: settings.maxRetries,
         retryDelaySeconds: settings.retryDelaySeconds,
-        jobRetentionHours: settings.jobRetentionHours,
-      };
-      const saved = await saveSettings(payload);
+        spreadsheetBatchSize: settings.spreadsheetBatchSize,
+        tesseractPath: settings.tesseractPath,
+      });
       setSettings(saved);
-      setMessage("Settings saved");
+      pushStatus("Settings saved", "success");
     } catch (error) {
-      setMessage(`Settings save failed: ${String(error)}`);
+      pushStatus(`Settings save failed: ${String(error)}`, "error");
     } finally {
       setSavingSettings(false);
     }
   }
 
-  return (
-    <div className="app-shell">
-      <header className="topbar">
-        <div>
-          <h1>SourceStack Desktop</h1>
-          <p>Local resume parsing with Google Drive and Sheets sync</p>
-        </div>
-        <div className="topbar-status">
-          <span className="chip chip-muted">{progressText}</span>
-          <AccountMenu
-            auth={auth}
-            busyAuth={busyAuth || manualAuthBusy}
-            loadingJobs={loadingJobs}
-            onSignIn={() => void handleSignIn()}
-            onSignOut={() => void handleSignOut()}
-            onManualSignIn={() => void handleBeginManualAuth(true)}
-            onRefreshJobs={() => void refreshJobs()}
-            onOpenSettings={() => setTab("settings")}
-          />
-        </div>
-      </header>
+  async function handlePickParseFile(file: File | null) {
+    setParseDragActive(false);
 
-      <aside className="sidebar">
-        <button
-          className={tab === "dashboard" ? "nav active" : "nav"}
-          onClick={() => setTab("dashboard")}
-        >
-          Dashboard
-        </button>
-        <button
-          className={tab === "jobs" ? "nav active" : "nav"}
-          onClick={() => setTab("jobs")}
-        >
-          Jobs
-        </button>
-        <button
-          className={tab === "settings" ? "nav active" : "nav"}
-          onClick={() => setTab("settings")}
-        >
-          Settings
-        </button>
-
-        <div className="sidebar-footer">
-          <button className="secondary" onClick={() => void refreshJobs()}>
-            {loadingJobs ? "Refreshing..." : "Refresh Jobs"}
-          </button>
-        </div>
-      </aside>
-
-      <main className="content">
-        {manualAuthVisible && (
-          <section className="card auth-card">
-            <h2>Manual Google Sign-In</h2>
-            <p>
-              {manualAuthReason ||
-                "Use this fallback when automatic browser callback cannot complete."}
-            </p>
-
-            <div className="auth-actions">
-              <button
-                className="secondary"
-                disabled={manualAuthBusy}
-                onClick={() => void handleBeginManualAuth(false)}
-              >
-                {manualAuthBusy ? "Preparing..." : "Generate Challenge"}
-              </button>
-              <button
-                className="primary"
-                disabled={!manualAuthChallenge || manualAuthBusy}
-                onClick={() => void handleOpenManualAuthUrl()}
-              >
-                Open Google Consent
-              </button>
-            </div>
-
-            {manualAuthChallenge && (
-              <div className="auth-meta">
-                <ResultRow label="Session ID" value={manualAuthChallenge.sessionId} />
-                <ResultRow label="Redirect URI" value={manualAuthChallenge.redirectUri} />
-                <ResultRow
-                  label="Expires"
-                  value={formatDateTime(manualAuthChallenge.expiresAt)}
-                />
-              </div>
-            )}
-
-            <label className="field">
-              <span>Callback URL or Authorization Code</span>
-              <input
-                value={manualAuthInput}
-                onChange={(event) => setManualAuthInput(event.target.value)}
-                placeholder="Paste callback URL from browser or code"
-              />
-            </label>
-
-            {manualAuthError && <p className="alert-error">{manualAuthError}</p>}
-
-            <div className="auth-actions">
-              <button
-                className="primary"
-                disabled={manualAuthBusy}
-                onClick={() => void handleCompleteManualAuth()}
-              >
-                {manualAuthBusy ? "Verifying..." : "Complete Manual Sign-In"}
-              </button>
-              <button
-                className="secondary"
-                onClick={() => {
-                  setManualAuthVisible(false);
-                  setManualAuthError("");
-                }}
-              >
-                Close
-              </button>
-            </div>
-          </section>
-        )}
-
-        {tab === "dashboard" && (
-          <section className="grid-two">
-            <article className="card">
-              <h2>Local Resume Parse</h2>
-              <p>Upload one PDF/DOCX and parse on-device.</p>
-
-              <label className="field">
-                <span>Resume File</span>
-                <input
-                  type="file"
-                  accept=".pdf,.docx"
-                  onChange={(event) =>
-                    setSelectedFile(event.target.files?.[0] ?? null)
-                  }
-                />
-              </label>
-
-              <button
-                className="primary"
-                disabled={parseLoading}
-                onClick={() => void handleParseSingle()}
-              >
-                {parseLoading ? "Parsing..." : "Parse Resume"}
-              </button>
-
-              {parseResult && (
-                <div className="result-grid">
-                  <ResultRow label="Name" value={parseResult.name} />
-                  <ResultRow label="Email" value={parseResult.email} />
-                  <ResultRow label="Phone" value={parseResult.phone} />
-                  <ResultRow label="LinkedIn" value={parseResult.linkedIn} />
-                  <ResultRow label="GitHub" value={parseResult.gitHub} />
-                  <ResultRow
-                    label="Confidence"
-                    value={parseResult.confidence.toFixed(2)}
-                  />
-                  <ResultRow
-                    label="Errors"
-                    value={
-                      parseResult.errors.length > 0
-                        ? parseResult.errors.join("; ")
-                        : "-"
-                    }
-                  />
-                </div>
-              )}
-            </article>
-
-            <article className="card">
-              <h2>Drive Batch Parse</h2>
-              <p>Browse your Drive inside SourceStack and choose the folder to process.</p>
-
-              <DriveFolderBrowser
-                authSignedIn={auth.signedIn}
-                disabled={driveBrowsingLocked}
-                selectedFolderId={selectedDriveFolder?.id}
-                onFolderSelect={(id, name) => setSelectedDriveFolder({ id, name })}
-              />
-
-              <div className="drive-selection-strip">
-                <div className="drive-selection-copy">
-                  <span className="drive-selection-label">Selected folder</span>
-                  <strong>{selectedDriveFolder?.name ?? "No folder selected"}</strong>
-                  <span className="drive-selection-meta">
-                    {selectedDriveFolder
-                      ? "Ready to process the folder you selected in the Drive browser."
-                      : "Choose a folder from the Drive browser above."}
-                  </span>
-                </div>
-              </div>
-
-              <label className="field">
-                <span>Spreadsheet ID (optional)</span>
-                <input
-                  value={spreadsheetId}
-                  onChange={(e) => setSpreadsheetId(e.target.value)}
-                  placeholder="Existing sheet ID"
-                />
-              </label>
-
-              <div className="button-row">
-                <button
-                  className="primary"
-                  disabled={!selectedDriveFolder?.id || driveBrowsingLocked}
-                  onClick={() => void handleStartBatchJob()}
-                >
-                  Start Batch Job
-                </button>
-                <button
-                  className="secondary"
-                  disabled={!activeJobId}
-                  onClick={() =>
-                    activeJobId ? void refreshStatus(activeJobId, true) : undefined
-                  }
-                >
-                  Refresh Status
-                </button>
-              </div>
-
-              {activeJobId && (
-                <div className="job-box">
-                  {selectedDriveFolder?.name && (
-                    <p>
-                      <strong>Folder:</strong> {selectedDriveFolder.name}
-                    </p>
-                  )}
-                  <p>
-                    <strong>Active Job:</strong> {activeJobId}
-                  </p>
-                  <p>
-                    <strong>Status:</strong> {jobStatus?.status ?? "-"}
-                  </p>
-                  <p>
-                    <strong>Progress:</strong> {jobStatus?.progress ?? 0}%
-                  </p>
-                  <button
-                    className="danger"
-                    onClick={() => void handleCancelActiveJob()}
-                  >
-                    Cancel Active Job
-                  </button>
-                </div>
-              )}
-            </article>
-          </section>
-        )}
-
-        {tab === "jobs" && (
-          <section className="card jobs-card">
-            <h2>Jobs</h2>
-            <p>Inspect local persisted jobs and results.</p>
-
-            <div className="jobs-layout">
-              <div className="jobs-list">
-                {jobs.length === 0 && <p>No jobs yet.</p>}
-                {jobs.map((jobId) => (
-                  <button
-                    key={jobId}
-                    className="job-item"
-                    onClick={() => void refreshStatus(jobId, false)}
-                  >
-                    {jobId}
-                  </button>
-                ))}
-              </div>
-
-              <div className="jobs-details">
-                {jobStatus ? (
-                  <>
-                    <h3>Job Status</h3>
-                    <ResultRow label="Job ID" value={jobStatus.jobId} />
-                    <ResultRow label="State" value={jobStatus.status} />
-                    <ResultRow
-                      label="Progress"
-                      value={`${jobStatus.progress}% (${jobStatus.processedFiles}/${jobStatus.totalFiles})`}
-                    />
-                    <ResultRow label="Spreadsheet" value={jobStatus.spreadsheetId} />
-                    <ResultRow
-                      label="Created"
-                      value={formatDateTime(jobStatus.createdAt)}
-                    />
-                    <ResultRow
-                      label="Started"
-                      value={formatDateTime(jobStatus.startedAt)}
-                    />
-                    <ResultRow
-                      label="Completed"
-                      value={formatDateTime(jobStatus.completedAt)}
-                    />
-                    <ResultRow label="Error" value={jobStatus.error} />
-                  </>
-                ) : (
-                  <p>Select a job to view status.</p>
-                )}
-              </div>
-            </div>
-
-            {jobResults.length > 0 && (
-              <div className="results-table-wrap">
-                <h3>Results ({jobResults.length})</h3>
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Name</th>
-                      <th>Email</th>
-                      <th>Phone</th>
-                      <th>LinkedIn</th>
-                      <th>GitHub</th>
-                      <th>Confidence</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {jobResults.map((candidate, idx) => (
-                      <tr key={`${candidate.sourceFile ?? "candidate"}-${idx}`}>
-                        <td>{candidate.name ?? "-"}</td>
-                        <td>{candidate.email ?? "-"}</td>
-                        <td>{candidate.phone ?? "-"}</td>
-                        <td>{candidate.linkedIn ?? "-"}</td>
-                        <td>{candidate.gitHub ?? "-"}</td>
-                        <td>{candidate.confidence.toFixed(2)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </section>
-        )}
-
-        {tab === "settings" && (
-          <section className="card settings-card">
-            <h2>Settings</h2>
-            <p>Runtime tuning. Google OAuth is managed by this app build.</p>
-
-            <div className="notice notice-info">
-              End users only use Sign In / Sign Out. OAuth client credentials are
-              bundled by Dipesh from engineering team. Required scopes include
-              Drive read-only and Sheets write access.
-            </div>
-
-            {!settings.googleClientId.trim() && (
-              <div className="notice notice-warning">
-                This build is missing OAuth client configuration
-                (`SOURCESTACK_GOOGLE_CLIENT_ID` or `GOOGLE_CLIENT_ID`).
-              </div>
-            )}
-
-            <div className="settings-grid">
-              <div className="field">
-                <span>OAuth Secret Status</span>
-                <div className="secret-pill">
-                  {settings.googleClientSecretConfigured
-                    ? "Configured"
-                    : "Not configured (only needed for clients that require secret)"}
-                </div>
-              </div>
-
-              <label className="field">
-                <span>Tesseract Path</span>
-                <input
-                  value={settings.tesseractPath}
-                  onChange={(e) =>
-                    setSettings({ ...settings, tesseractPath: e.target.value })
-                  }
-                />
-              </label>
-
-              <label className="field">
-                <span>Max Concurrency</span>
-                <input
-                  type="number"
-                  min={1}
-                  value={settings.maxConcurrentRequests}
-                  onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      maxConcurrentRequests: Number(e.target.value || "1"),
-                    })
-                  }
-                />
-              </label>
-
-              <label className="field">
-                <span>Spreadsheet Batch Size</span>
-                <input
-                  type="number"
-                  min={1}
-                  value={settings.spreadsheetBatchSize}
-                  onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      spreadsheetBatchSize: Number(e.target.value || "1"),
-                    })
-                  }
-                />
-              </label>
-
-              <label className="field">
-                <span>Max Retries</span>
-                <input
-                  type="number"
-                  min={1}
-                  value={settings.maxRetries}
-                  onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      maxRetries: Number(e.target.value || "1"),
-                    })
-                  }
-                />
-              </label>
-
-              <label className="field">
-                <span>Retry Delay (seconds)</span>
-                <input
-                  type="number"
-                  min={0.1}
-                  step={0.1}
-                  value={settings.retryDelaySeconds}
-                  onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      retryDelaySeconds: Number(e.target.value || "0.1"),
-                    })
-                  }
-                />
-              </label>
-
-              <label className="field">
-                <span>Job Retention (hours)</span>
-                <input
-                  type="number"
-                  min={1}
-                  value={settings.jobRetentionHours}
-                  onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      jobRetentionHours: Number(e.target.value || "1"),
-                    })
-                  }
-                />
-              </label>
-            </div>
-
-            <button
-              className="primary"
-              disabled={savingSettings}
-              onClick={() => void handleSaveSettings()}
-            >
-              {savingSettings ? "Saving..." : "Save Settings"}
-            </button>
-          </section>
-        )}
-      </main>
-
-      <footer className="statusbar">{message}</footer>
-    </div>
-  );
-}
-
-function ResultRow({
-  label,
-  value,
-}: {
-  label: string;
-  value?: string | number | null;
-}) {
-  return (
-    <div className="result-row">
-      <span>{label}</span>
-      <strong>
-        {value !== undefined && value !== null && value !== "" ? String(value) : "-"}
-      </strong>
-    </div>
-  );
-}
-
-function AccountMenu({
-  auth,
-  busyAuth,
-  loadingJobs,
-  onSignIn,
-  onSignOut,
-  onManualSignIn,
-  onRefreshJobs,
-  onOpenSettings,
-}: {
-  auth: AuthStatus;
-  busyAuth: boolean;
-  loadingJobs: boolean;
-  onSignIn: () => void;
-  onSignOut: () => void;
-  onManualSignIn: () => void;
-  onRefreshJobs: () => void;
-  onOpenSettings: () => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const menuRef = useRef<HTMLDivElement | null>(null);
-  const displayName = auth.name?.trim() || auth.email?.trim() || "Google account";
-  const detailLine = auth.signedIn
-    ? auth.email?.trim() || "Connected to Google"
-    : "Google account disconnected";
-
-  useEffect(() => {
-    if (!open) {
+    if (!file) {
       return;
     }
 
-    function handlePointerDown(event: MouseEvent) {
-      if (menuRef.current?.contains(event.target as Node)) {
+    if (!isSupportedResumeFileName(file.name)) {
+      pushStatus("Only PDF and DOCX files can be parsed.", "error");
+      return;
+    }
+
+    setSelectedFile(file);
+    setParseResult(null);
+  }
+
+  async function handleSelectDriveFolder(folder: DriveFolderEntry) {
+    if (selectedDriveFolder?.id === folder.id) {
+      setSelectedDriveFolder(null);
+      return;
+    }
+
+    const currentFolderSelected = driveState.currentFolderId === folder.id;
+    const immediateResumeCount = currentFolderSelected
+      ? driveState.files.filter((file) => isSupportedResumeFile(file)).length
+      : null;
+
+    setSelectedDriveFolder({
+      id: folder.id,
+      loadingCount: !currentFolderSelected,
+      name: folder.name,
+      resumeCount: immediateResumeCount,
+    });
+
+    if (currentFolderSelected) {
+      return;
+    }
+
+    const requestId = ++folderCountRequestIdRef.current;
+
+    try {
+      const files = await listDriveFiles(folder.id);
+      if (folderCountRequestIdRef.current !== requestId) {
         return;
       }
-      setOpen(false);
-    }
 
-    function handleEscape(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        setOpen(false);
+      const resumeCount = files.filter((file) => isSupportedResumeFile(file)).length;
+      setSelectedDriveFolder((current) =>
+        current && current.id === folder.id
+          ? { ...current, loadingCount: false, resumeCount }
+          : current,
+      );
+    } catch (error) {
+      if (folderCountRequestIdRef.current !== requestId) {
+        return;
       }
+
+      setSelectedDriveFolder((current) =>
+        current && current.id === folder.id
+          ? { ...current, loadingCount: false }
+          : current,
+      );
+      pushStatus(`Failed to inspect folder contents: ${String(error)}`, "error");
     }
+  }
 
-    window.addEventListener("mousedown", handlePointerDown);
-    window.addEventListener("keydown", handleEscape);
+  async function handleOpenSpreadsheet(spreadsheetId: string) {
+    try {
+      await openUrl(`https://docs.google.com/spreadsheets/d/${spreadsheetId}`);
+    } catch (error) {
+      pushStatus(`Failed to open spreadsheet: ${String(error)}`, "error");
+    }
+  }
 
-    return () => {
-      window.removeEventListener("mousedown", handlePointerDown);
-      window.removeEventListener("keydown", handleEscape);
-    };
-  }, [open]);
+  async function handleOpenDriveFile(fileId: string) {
+    try {
+      await openUrl(`https://drive.google.com/file/d/${fileId}/view`);
+    } catch (error) {
+      pushStatus(`Failed to open Drive file: ${String(error)}`, "error");
+    }
+  }
 
-  const runAction = (action: () => void) => {
-    setOpen(false);
-    action();
-  };
+  function pushStatus(text: string, tone: StatusTone) {
+    setWorkspaceStatus({ text, tone });
+  }
 
-  return (
-    <div className="account-menu" ref={menuRef}>
-      <button
-        className={`account-trigger ${open ? "open" : ""}`}
-        onClick={() => setOpen((current) => !current)}
-        aria-label={auth.signedIn ? "Open Google account menu" : "Open account menu"}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        type="button"
-      >
-        <AccountAvatar auth={auth} />
-        <span
-          className={`account-presence ${auth.signedIn ? "connected" : "disconnected"}`}
-          aria-hidden="true"
-        />
-      </button>
+  function syncActiveJobFromSummaries(nextJobs: JobListItem[]) {
+    const current = activeJobId
+      ? nextJobs.find((item) => item.status.jobId === activeJobId)?.status ?? null
+      : null;
+    const discovered = nextJobs.find((item) => !isTerminalJobState(item.status.status))?.status ?? null;
+    const nextActive = current ?? discovered;
 
-      {open && (
-        <div className="account-dropdown" role="menu">
-          <div className="account-summary">
-            <AccountAvatar auth={auth} large />
-            <div className="account-summary-copy">
-              <strong>{displayName}</strong>
-              <span>{detailLine}</span>
-              {auth.signedIn && auth.expiresAt && (
-                <span>Session expires {formatDateTime(auth.expiresAt)}</span>
-              )}
-            </div>
-          </div>
+    setActiveJobId(nextActive?.jobId ?? null);
+    setActiveJobStatus(nextActive ?? null);
+  }
 
-          <div className="account-actions">
-            {!auth.signedIn && (
-              <button
-                className="account-action"
-                disabled={busyAuth}
-                onClick={() => runAction(onSignIn)}
-                type="button"
-              >
-                {busyAuth ? "Signing In..." : "Sign In Google"}
-              </button>
-            )}
-            {!auth.signedIn && (
-              <button
-                className="account-action"
-                disabled={busyAuth}
-                onClick={() => runAction(onManualSignIn)}
-                type="button"
-              >
-                Manual Sign-In
-              </button>
-            )}
-            <button
-              className="account-action"
-              disabled={loadingJobs}
-              onClick={() => runAction(onRefreshJobs)}
-              type="button"
-            >
-              {loadingJobs ? "Refreshing Jobs..." : "Refresh Jobs"}
-            </button>
-            <button
-              className="account-action"
-              onClick={() => runAction(onOpenSettings)}
-              type="button"
-            >
-              Open Settings
-            </button>
-            {auth.signedIn && (
-              <button
-                className="account-action danger"
-                disabled={busyAuth}
-                onClick={() => runAction(onSignOut)}
-                type="button"
-              >
-                {busyAuth ? "Signing Out..." : "Sign Out Google"}
-              </button>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function AccountAvatar({
-  auth,
-  large = false,
-}: {
-  auth: AuthStatus;
-  large?: boolean;
-}) {
-  const initial = (auth.name?.trim() || auth.email?.trim() || "G")
-    .charAt(0)
-    .toUpperCase();
-  const className = large ? "account-avatar large" : "account-avatar";
-
-  if (auth.picture?.trim()) {
-    return (
-      <img
-        src={auth.picture}
-        alt={auth.name?.trim() || auth.email?.trim() || "Google profile"}
-        className={className}
-        referrerPolicy="no-referrer"
-      />
-    );
+  function upsertJobStatus(status: JobStatus) {
+    setJobs((current) => {
+      const next = current
+        .filter((item) => item.status.jobId !== status.jobId)
+        .concat([{ sortTimestamp: sortTimestampForJob(status), status }]);
+      next.sort((left, right) => right.sortTimestamp - left.sortTimestamp);
+      return next;
+    });
   }
 
   return (
-    <div className={`${className} fallback`} aria-hidden="true">
-      {initial}
-    </div>
+    <AppShell
+      activeView={activeView}
+      auth={auth}
+      authBusy={busyAuth || manualAuthBusy}
+      centerLabel={centerLabel}
+      onManualSignIn={() => void handleBeginManualAuth(false)}
+      onNavigate={setActiveView}
+      onOpenSettings={() => setActiveView("settings")}
+      onRefresh={() => void refreshWorkspace(true)}
+      onSignIn={() => void handleSignIn()}
+      onSignOut={() => void handleSignOut()}
+      refreshing={workspaceRefreshing}
+      statusText={workspaceStatus.text}
+      statusTone={workspaceStatus.tone}
+    >
+      {activeView === "dashboard" && (
+        <DashboardView
+          activeJobId={activeJobId}
+          activeJobStatus={activeJobStatus}
+          auth={auth}
+          authBusy={busyAuth || manualAuthBusy}
+          driveBrowsingLocked={driveBrowsingLocked}
+          driveState={driveState}
+          manualAuthChallenge={manualAuthChallenge}
+          manualAuthError={manualAuthError}
+          manualAuthInput={manualAuthInput}
+          manualAuthReason={manualAuthReason}
+          manualAuthVisible={manualAuthVisible}
+          onCancelActiveJob={() => void handleCancelActiveJob()}
+          onClearParseFile={() => {
+            setSelectedFile(null);
+            setParseResult(null);
+          }}
+          onCloseManualAuth={() => {
+            setManualAuthVisible(false);
+            setManualAuthError("");
+          }}
+          onCompleteManualAuth={() => void handleCompleteManualAuth()}
+          onCopyManualAuthUrl={() => void handleCopyManualAuthUrl()}
+          onDeselectDriveFolder={() => setSelectedDriveFolder(null)}
+          onManualAuthInputChange={setManualAuthInput}
+          onNavigateDrivePath={(folderId) => void loadDriveFolder(folderId)}
+          onOpenDriveFolder={(folder) => void loadDriveFolder(folder.id)}
+          onOpenManualAuthUrl={() => void handleOpenManualAuthUrl()}
+          onParse={() => void handleParseSingle()}
+          onPickFile={(file) => void handlePickParseFile(file)}
+          onRefreshActiveJob={() =>
+            activeJobId ? void refreshActiveJobStatus(activeJobId, true) : undefined
+          }
+          onSelectDriveFolder={(folder) => void handleSelectDriveFolder(folder)}
+          onSetParseDragActive={setParseDragActive}
+          onSignIn={() => void handleSignIn()}
+          onStartBatchJob={() => void handleStartBatchJob()}
+          onStartManualAuth={(openImmediately) =>
+            void handleBeginManualAuth(openImmediately)
+          }
+          parseDragActive={parseDragActive}
+          parseLoading={parseLoading}
+          parseResult={parseResult}
+          selectedDriveFolder={selectedDriveFolder}
+          selectedFile={selectedFile}
+          spreadsheetId={spreadsheetId}
+          onSpreadsheetIdChange={setSpreadsheetId}
+        />
+      )}
+
+      {activeView === "jobs" && (
+        <JobsView
+          jobs={jobs}
+          jobsLoading={jobsLoading}
+          onOpenDriveFile={(fileId) => void handleOpenDriveFile(fileId)}
+          onOpenSpreadsheet={(id) => void handleOpenSpreadsheet(id)}
+          onSelectJob={setSelectedJobId}
+          selectedJobId={selectedJobId}
+          selectedJobResults={selectedJobResults}
+          selectedJobResultsError={selectedJobResultsError}
+          selectedJobResultsLoading={selectedJobResultsLoading}
+        />
+      )}
+
+      {activeView === "settings" && (
+        <SettingsView
+          onChange={(patch) => setSettings((current) => ({ ...current, ...patch }))}
+          onSave={() => void handleSaveSettings()}
+          saving={savingSettings}
+          settings={settings}
+        />
+      )}
+    </AppShell>
   );
 }
-
-export default App;
