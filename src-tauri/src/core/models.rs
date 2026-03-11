@@ -86,6 +86,8 @@ pub struct JobStatus {
 pub struct AuthStatus {
     pub signed_in: bool,
     pub email: Option<String>,
+    pub name: Option<String>,
+    pub picture: Option<String>,
     pub expires_at: Option<DateTime<Utc>>,
 }
 

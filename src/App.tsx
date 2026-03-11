@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import "./App.css";
 import {
@@ -357,12 +357,17 @@ function App() {
           <p>Local resume parsing with Google Drive and Sheets sync</p>
         </div>
         <div className="topbar-status">
-          <span className={`chip ${auth.signedIn ? "chip-ok" : "chip-muted"}`}>
-            {auth.signedIn
-              ? `Google: ${auth.email ?? "Signed In"}`
-              : "Google: Signed Out"}
-          </span>
           <span className="chip chip-muted">{progressText}</span>
+          <AccountMenu
+            auth={auth}
+            busyAuth={busyAuth || manualAuthBusy}
+            loadingJobs={loadingJobs}
+            onSignIn={() => void handleSignIn()}
+            onSignOut={() => void handleSignOut()}
+            onManualSignIn={() => void handleBeginManualAuth(true)}
+            onRefreshJobs={() => void refreshJobs()}
+            onOpenSettings={() => setTab("settings")}
+          />
         </div>
       </header>
 
@@ -387,17 +392,6 @@ function App() {
         </button>
 
         <div className="sidebar-footer">
-          <button
-            className="secondary"
-            disabled={busyAuth}
-            onClick={auth.signedIn ? handleSignOut : handleSignIn}
-          >
-            {busyAuth
-              ? "Working..."
-              : auth.signedIn
-                ? "Sign Out Google"
-                : "Sign In Google"}
-          </button>
           <button className="secondary" onClick={() => void refreshJobs()}>
             {loadingJobs ? "Refreshing..." : "Refresh Jobs"}
           </button>
@@ -810,6 +804,177 @@ function ResultRow({
       <strong>
         {value !== undefined && value !== null && value !== "" ? String(value) : "-"}
       </strong>
+    </div>
+  );
+}
+
+function AccountMenu({
+  auth,
+  busyAuth,
+  loadingJobs,
+  onSignIn,
+  onSignOut,
+  onManualSignIn,
+  onRefreshJobs,
+  onOpenSettings,
+}: {
+  auth: AuthStatus;
+  busyAuth: boolean;
+  loadingJobs: boolean;
+  onSignIn: () => void;
+  onSignOut: () => void;
+  onManualSignIn: () => void;
+  onRefreshJobs: () => void;
+  onOpenSettings: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const displayName = auth.name?.trim() || auth.email?.trim() || "Google account";
+  const detailLine = auth.signedIn
+    ? auth.email?.trim() || "Connected to Google"
+    : "Google account disconnected";
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    function handlePointerDown(event: MouseEvent) {
+      if (menuRef.current?.contains(event.target as Node)) {
+        return;
+      }
+      setOpen(false);
+    }
+
+    function handleEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+    }
+
+    window.addEventListener("mousedown", handlePointerDown);
+    window.addEventListener("keydown", handleEscape);
+
+    return () => {
+      window.removeEventListener("mousedown", handlePointerDown);
+      window.removeEventListener("keydown", handleEscape);
+    };
+  }, [open]);
+
+  const runAction = (action: () => void) => {
+    setOpen(false);
+    action();
+  };
+
+  return (
+    <div className="account-menu" ref={menuRef}>
+      <button
+        className={`account-trigger ${open ? "open" : ""}`}
+        onClick={() => setOpen((current) => !current)}
+        aria-label={auth.signedIn ? "Open Google account menu" : "Open account menu"}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        type="button"
+      >
+        <AccountAvatar auth={auth} />
+        <span
+          className={`account-presence ${auth.signedIn ? "connected" : "disconnected"}`}
+          aria-hidden="true"
+        />
+      </button>
+
+      {open && (
+        <div className="account-dropdown" role="menu">
+          <div className="account-summary">
+            <AccountAvatar auth={auth} large />
+            <div className="account-summary-copy">
+              <strong>{displayName}</strong>
+              <span>{detailLine}</span>
+              {auth.signedIn && auth.expiresAt && (
+                <span>Session expires {formatDateTime(auth.expiresAt)}</span>
+              )}
+            </div>
+          </div>
+
+          <div className="account-actions">
+            {!auth.signedIn && (
+              <button
+                className="account-action"
+                disabled={busyAuth}
+                onClick={() => runAction(onSignIn)}
+                type="button"
+              >
+                {busyAuth ? "Signing In..." : "Sign In Google"}
+              </button>
+            )}
+            {!auth.signedIn && (
+              <button
+                className="account-action"
+                disabled={busyAuth}
+                onClick={() => runAction(onManualSignIn)}
+                type="button"
+              >
+                Manual Sign-In
+              </button>
+            )}
+            <button
+              className="account-action"
+              disabled={loadingJobs}
+              onClick={() => runAction(onRefreshJobs)}
+              type="button"
+            >
+              {loadingJobs ? "Refreshing Jobs..." : "Refresh Jobs"}
+            </button>
+            <button
+              className="account-action"
+              onClick={() => runAction(onOpenSettings)}
+              type="button"
+            >
+              Open Settings
+            </button>
+            {auth.signedIn && (
+              <button
+                className="account-action danger"
+                disabled={busyAuth}
+                onClick={() => runAction(onSignOut)}
+                type="button"
+              >
+                {busyAuth ? "Signing Out..." : "Sign Out Google"}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AccountAvatar({
+  auth,
+  large = false,
+}: {
+  auth: AuthStatus;
+  large?: boolean;
+}) {
+  const initial = (auth.name?.trim() || auth.email?.trim() || "G")
+    .charAt(0)
+    .toUpperCase();
+  const className = large ? "account-avatar large" : "account-avatar";
+
+  if (auth.picture?.trim()) {
+    return (
+      <img
+        src={auth.picture}
+        alt={auth.name?.trim() || auth.email?.trim() || "Google profile"}
+        className={className}
+        referrerPolicy="no-referrer"
+      />
+    );
+  }
+
+  return (
+    <div className={`${className} fallback`} aria-hidden="true">
+      {initial}
     </div>
   );
 }
