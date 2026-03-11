@@ -673,13 +673,14 @@ function App() {
 
             <div className="notice notice-info">
               End users only use Sign In / Sign Out. OAuth client credentials are
-              bundled by Dipesh from engineering team.
+              bundled by Dipesh from engineering team. Required scopes include
+              Drive read-only and Sheets write access.
             </div>
 
             {!settings.googleClientId.trim() && (
               <div className="notice notice-warning">
                 This build is missing OAuth client configuration
-                (`SOURCESTACK_GOOGLE_CLIENT_ID`).
+                (`SOURCESTACK_GOOGLE_CLIENT_ID` or `GOOGLE_CLIENT_ID`).
               </div>
             )}
 

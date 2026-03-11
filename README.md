@@ -88,7 +88,18 @@ Set these at build time (or in your shell before `pnpm tauri dev/build`):
 ```bash
 export SOURCESTACK_GOOGLE_CLIENT_ID="your_desktop_oauth_client_id.apps.googleusercontent.com"
 export SOURCESTACK_GOOGLE_CLIENT_SECRET="optional_if_required_by_your_client"
+# optional when reusing a web OAuth client
+export SOURCESTACK_GOOGLE_REDIRECT_URI="http://localhost:4000/api/auth/callback/google"
 ```
+
+Desktop also accepts shared env names used in web/api projects:
+
+```bash
+export GOOGLE_CLIENT_ID="your_desktop_oauth_client_id.apps.googleusercontent.com"
+export GOOGLE_CLIENT_SECRET="optional_if_required_by_your_client"
+```
+
+`SOURCESTACK_*` takes precedence when both variants are set.
 
 ## Run Dev Mode (macOS/Windows)
 
