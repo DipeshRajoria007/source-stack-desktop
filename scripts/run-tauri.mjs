@@ -34,7 +34,8 @@ if (!env.CARGO) {
 const child = spawn(tauriCmd, process.argv.slice(2), {
   stdio: "inherit",
   env,
-  shell: false,
+  // Windows command shims like `tauri.cmd` need a shell to spawn correctly.
+  shell: isWindows,
 });
 
 child.on("exit", (code, signal) => {
