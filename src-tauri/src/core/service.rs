@@ -35,6 +35,9 @@ const HEADER_COLUMNS: [&str; 6] = [
     "LinkedIn",
     "GitHub",
 ];
+const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const FILE_PROCESS_TIMEOUT: Duration = Duration::from_secs(180);
 
 struct BatchJobWorkItem {
     job_id: String,
@@ -79,6 +82,8 @@ impl CoreService {
         let settings = RuntimeSettings::from_parts(loaded.persisted.sanitized(), secret);
 
         let client = reqwest::Client::builder()
+            .connect_timeout(HTTP_CONNECT_TIMEOUT)
+            .timeout(HTTP_REQUEST_TIMEOUT)
             .user_agent("SourceStackDesktop/1.0")
             .build()
             .context("failed to build HTTP client")?;
@@ -104,6 +109,8 @@ impl CoreService {
             cancellation_tokens: Mutex::new(HashMap::new()),
             killed_jobs: Mutex::new(HashSet::new()),
         });
+
+        service.recover_orphaned_jobs().await?;
 
         let worker_service = Arc::clone(&service);
         tokio::spawn(async move {
@@ -528,7 +535,7 @@ impl CoreService {
                     err.to_string()
                 };
 
-                if status == JobProcessingState::Revoked {
+                if !results.is_empty() {
                     self.job_store
                         .save_results(&work_item.job_id, &results)
                         .await?;
@@ -667,7 +674,7 @@ impl CoreService {
                 .await?;
 
             let max_concurrency = settings.max_concurrent_requests.max(1);
-            let batch_results: Vec<ParsedCandidate> = stream::iter(batch.iter().cloned())
+            let mut batch_stream = stream::iter(batch.iter().cloned())
                 .map(|file| {
                     let access_token = access_token.clone();
                     let settings = settings.clone();
@@ -676,69 +683,52 @@ impl CoreService {
                             .await
                     }
                 })
-                .buffer_unordered(max_concurrency)
-                .collect()
-                .await;
+                .buffer_unordered(max_concurrency);
 
-            self.ensure_job_not_stopped(&work_item.job_id, cancellation_token)
-                .await?;
-            let rows: Vec<Vec<String>> = batch_results
-                .iter()
-                .map(|candidate| {
-                    vec![
-                        candidate.name.clone().unwrap_or_default(),
-                        candidate
-                            .drive_file_id
-                            .as_ref()
-                            .map(|v| format!("https://drive.google.com/file/d/{v}/view"))
-                            .unwrap_or_default(),
-                        candidate.phone.clone().unwrap_or_default(),
-                        candidate.email.clone().unwrap_or_default(),
-                        candidate.linked_in.clone().unwrap_or_default(),
-                        candidate.git_hub.clone().unwrap_or_default(),
-                    ]
-                })
-                .filter(|row| row.iter().any(|cell| !cell.trim().is_empty()))
-                .collect();
-
-            if !rows.is_empty() {
+            while let Some(candidate) = batch_stream.next().await {
                 self.ensure_job_not_stopped(&work_item.job_id, cancellation_token)
                     .await?;
-                if let Some(sheet_id) = spreadsheet_id.as_deref() {
-                    self.sheets
-                        .append_rows(&access_token, sheet_id, &rows, true)
-                        .await?;
+
+                *processed_count += 1;
+
+                let row = candidate_to_sheet_row(&candidate);
+                if row.iter().any(|cell| !cell.trim().is_empty()) {
+                    if let Some(sheet_id) = spreadsheet_id.as_deref() {
+                        self.sheets
+                            .append_rows(&access_token, sheet_id, &[row], true)
+                            .await?;
+                    }
                 }
 
-                *processed_count += rows.len() as i32;
+                results.push(candidate);
+                self.job_store
+                    .save_results(&work_item.job_id, results)
+                    .await?;
+
+                let progress = if *total_files == 0 {
+                    0
+                } else {
+                    (((*processed_count as f64) * 100.0 / *total_files as f64).floor() as i32)
+                        .min(99)
+                };
+
+                self.job_store
+                    .save_status(&JobStatus {
+                        job_id: work_item.job_id.clone(),
+                        status: JobProcessingState::Processing,
+                        progress,
+                        total_files: *total_files,
+                        processed_files: *processed_count,
+                        spreadsheet_id: spreadsheet_id.clone(),
+                        results_count: Some(results.len() as i32),
+                        error: None,
+                        created_at,
+                        started_at: Some(started_at),
+                        completed_at: None,
+                        duration_seconds: None,
+                    })
+                    .await?;
             }
-
-            results.extend(batch_results);
-
-            self.ensure_job_not_stopped(&work_item.job_id, cancellation_token)
-                .await?;
-            let progress = if *total_files == 0 {
-                0
-            } else {
-                (((*processed_count as f64) * 100.0 / *total_files as f64).floor() as i32).min(99)
-            };
-
-            self.job_store
-                .save_status(&JobStatus {
-                    job_id: work_item.job_id.clone(),
-                    status: JobProcessingState::Processing,
-                    progress,
-                    total_files: *total_files,
-                    processed_files: *processed_count,
-                    spreadsheet_id: spreadsheet_id.clone(),
-                    results_count: Some(results.len() as i32),
-                    error: None,
-                    created_at,
-                    started_at: Some(started_at),
-                    completed_at: None,
-                    duration_seconds: None,
-                })
-                .await?;
         }
 
         Ok(())
@@ -762,9 +752,15 @@ impl CoreService {
         let mut errors = Vec::new();
 
         for attempt in 0..settings.max_retries {
-            let processed = self
-                .process_single_file_once(&file, parser, access_token)
-                .await;
+            let processed = match tokio::time::timeout(
+                FILE_PROCESS_TIMEOUT,
+                self.process_single_file_once(&file, parser, access_token),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(timeout_error) => Err(timeout_error.into()),
+            };
 
             match processed {
                 Ok(candidate) => return candidate,
@@ -851,7 +847,65 @@ fn ensure_filename_extension(file_name: &str, mime_type: &str) -> String {
     }
 }
 
+fn candidate_to_sheet_row(candidate: &ParsedCandidate) -> Vec<String> {
+    vec![
+        candidate.name.clone().unwrap_or_default(),
+        candidate
+            .drive_file_id
+            .as_ref()
+            .map(|v| format!("https://drive.google.com/file/d/{v}/view"))
+            .unwrap_or_default(),
+        candidate.phone.clone().unwrap_or_default(),
+        candidate.email.clone().unwrap_or_default(),
+        candidate.linked_in.clone().unwrap_or_default(),
+        candidate.git_hub.clone().unwrap_or_default(),
+    ]
+}
+
 impl CoreService {
+    async fn recover_orphaned_jobs(&self) -> anyhow::Result<()> {
+        let job_ids = self.job_store.list_jobs().await?;
+        let now = Utc::now();
+
+        for job_id in job_ids {
+            let Some(existing_status) = self.job_store.load_status(&job_id).await? else {
+                continue;
+            };
+
+            if !matches!(
+                existing_status.status,
+                JobProcessingState::Pending | JobProcessingState::Processing
+            ) {
+                continue;
+            }
+
+            let duration_seconds = existing_status
+                .started_at
+                .map(|started_at| (now - started_at).num_milliseconds().max(0) as f64 / 1000.0);
+
+            self.job_store
+                .save_status(&JobStatus {
+                    job_id: existing_status.job_id,
+                    status: JobProcessingState::Failed,
+                    progress: existing_status.progress,
+                    total_files: existing_status.total_files,
+                    processed_files: existing_status.processed_files,
+                    spreadsheet_id: existing_status.spreadsheet_id,
+                    results_count: existing_status.results_count,
+                    error: Some(
+                        "Previous app instance stopped before this job completed.".to_string(),
+                    ),
+                    created_at: existing_status.created_at,
+                    started_at: existing_status.started_at,
+                    completed_at: Some(now),
+                    duration_seconds,
+                })
+                .await?;
+        }
+
+        Ok(())
+    }
+
     async fn has_kill_request(&self, job_id: &str) -> bool {
         let killed_jobs = self.killed_jobs.lock().await;
         killed_jobs.contains(job_id)
@@ -928,6 +982,13 @@ impl CoreService {
 }
 
 fn is_retryable_error(error: &anyhow::Error) -> bool {
+    if error
+        .downcast_ref::<tokio::time::error::Elapsed>()
+        .is_some()
+    {
+        return true;
+    }
+
     if let Some(core_error) = error.downcast_ref::<CoreError>() {
         return core_error.is_retryable();
     }
