@@ -1,0 +1,67 @@
+name: Build Windows Desktop
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/windows-build.yml"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "index.html"
+      - "vite.config.ts"
+      - "tsconfig.json"
+      - "tsconfig.node.json"
+      - "public/**"
+      - "src/**"
+      - "src-tauri/**"
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    env:
+      CI: "true"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.20.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri -> target
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check frontend
+        run: pnpm exec tsc --noEmit
+
+      - name: Build Tauri Windows bundle
+        run: pnpm tauri build
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-stack-desktop-windows
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/source-stack-desktop-tauri.exe
+            src-tauri/target/release/bundle/nsis/*
+            src-tauri/target/release/bundle/msi/*
