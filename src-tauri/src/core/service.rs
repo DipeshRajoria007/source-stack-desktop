@@ -16,9 +16,10 @@ use super::google_drive::GoogleDriveClient;
 use super::google_sheets::GoogleSheetsClient;
 use super::job_store::JsonJobStore;
 use super::models::{
-    AuthStatus, BatchParseRequest, DriveFileRef, GoogleSignInResult, JobProcessingState, JobStatus,
-    ManualAuthChallenge, ManualAuthCompleteRequest, ParsedCandidate, RuntimeSettings,
-    RuntimeSettingsUpdate, RuntimeSettingsView,
+    AuthStatus, BatchParseRequest, DriveBrowserFile, DriveFileRef, DriveFolderEntry,
+    DrivePathEntry, GoogleSignInResult, JobProcessingState, JobStatus, ManualAuthChallenge,
+    ManualAuthCompleteRequest, ParsedCandidate, RuntimeSettings, RuntimeSettingsUpdate,
+    RuntimeSettingsView,
 };
 use super::ocr::TesseractCliOcrService;
 use super::pdf::PdfTextExtractor;
@@ -285,6 +286,44 @@ impl CoreService {
     ) -> anyhow::Result<AuthStatus> {
         let settings = self.settings.read().await.clone();
         self.auth.complete_manual_sign_in(&settings, request).await
+    }
+
+    pub async fn list_drive_folders(
+        &self,
+        parent_folder_id: Option<String>,
+    ) -> anyhow::Result<Vec<DriveFolderEntry>> {
+        let settings = self.settings.read().await.clone();
+        let access_token = self
+            .auth
+            .get_access_token_non_interactive(&settings)
+            .await?;
+        self.drive
+            .list_folders(&access_token, parent_folder_id.as_deref())
+            .await
+    }
+
+    pub async fn list_drive_files(
+        &self,
+        folder_id: String,
+    ) -> anyhow::Result<Vec<DriveBrowserFile>> {
+        let settings = self.settings.read().await.clone();
+        let access_token = self
+            .auth
+            .get_access_token_non_interactive(&settings)
+            .await?;
+        self.drive.list_files(&access_token, &folder_id).await
+    }
+
+    pub async fn get_drive_folder_path(
+        &self,
+        folder_id: String,
+    ) -> anyhow::Result<Vec<DrivePathEntry>> {
+        let settings = self.settings.read().await.clone();
+        let access_token = self
+            .auth
+            .get_access_token_non_interactive(&settings)
+            .await?;
+        self.drive.get_folder_path(&access_token, &folder_id).await
     }
 
     pub fn google_auth_sign_out(&self) -> anyhow::Result<()> {

@@ -5,9 +5,9 @@ use base64::Engine;
 use tauri::State;
 
 use super::models::{
-    AuthStatus, BatchParseRequest, CommandOk, GoogleSignInResult, JobStatus, ManualAuthChallenge,
-    ManualAuthCompleteRequest, ParsedCandidate, RuntimeSettingsUpdate, RuntimeSettingsView,
-    StartJobResponse,
+    AuthStatus, BatchParseRequest, CommandOk, DriveBrowserFile, DriveFolderEntry, DrivePathEntry,
+    GoogleSignInResult, JobStatus, ManualAuthChallenge, ManualAuthCompleteRequest, ParsedCandidate,
+    RuntimeSettingsUpdate, RuntimeSettingsView, StartJobResponse,
 };
 use super::service::CoreService;
 
@@ -114,6 +114,42 @@ pub async fn google_auth_complete_manual(
     state
         .core
         .google_auth_complete_manual(request)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub async fn list_drive_folders(
+    state: State<'_, AppState>,
+    parent_folder_id: Option<String>,
+) -> Result<Vec<DriveFolderEntry>, String> {
+    state
+        .core
+        .list_drive_folders(parent_folder_id)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub async fn list_drive_files(
+    state: State<'_, AppState>,
+    folder_id: String,
+) -> Result<Vec<DriveBrowserFile>, String> {
+    state
+        .core
+        .list_drive_files(folder_id)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub async fn get_drive_folder_path(
+    state: State<'_, AppState>,
+    folder_id: String,
+) -> Result<Vec<DrivePathEntry>, String> {
+    state
+        .core
+        .get_drive_folder_path(folder_id)
         .await
         .map_err(|err| err.to_string())
 }

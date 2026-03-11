@@ -407,6 +407,299 @@ button:disabled {
   gap: 8px;
 }
 
+.drive-browser {
+  position: relative;
+  margin: 14px 0 12px;
+  border: 1px solid rgba(173, 202, 242, 0.22);
+  border-radius: 16px;
+  background:
+    linear-gradient(160deg, rgba(13, 20, 33, 0.92), rgba(19, 31, 50, 0.9)),
+    radial-gradient(circle at top left, rgba(111, 166, 255, 0.16), transparent 38%);
+  overflow: hidden;
+}
+
+.drive-browser.locked {
+  pointer-events: none;
+}
+
+.drive-browser-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  background: rgba(5, 10, 18, 0.62);
+  backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+}
+
+.drive-browser-overlay-card {
+  max-width: 320px;
+  display: grid;
+  gap: 6px;
+  padding: 16px 18px;
+  border-radius: 14px;
+  background: rgba(15, 23, 37, 0.96);
+  border: 1px solid rgba(190, 214, 246, 0.24);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.26);
+  text-align: center;
+}
+
+.drive-browser-overlay-card strong {
+  font-size: 0.95rem;
+}
+
+.drive-browser-overlay-card span {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.drive-browser-topbar {
+  padding: 16px 16px 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  border-bottom: 1px solid rgba(173, 202, 242, 0.12);
+}
+
+.drive-browser-kicker {
+  margin: 0 0 6px;
+  color: #8fb9ff;
+  font-size: 0.73rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.drive-browser-topbar h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.drive-browser-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.drive-browser-stats span {
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(173, 202, 242, 0.18);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  white-space: nowrap;
+}
+
+.drive-browser-breadcrumbs {
+  padding: 12px 16px 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.drive-breadcrumb {
+  border: 1px solid rgba(173, 202, 242, 0.18);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-primary);
+  padding: 7px 10px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+}
+
+.drive-breadcrumb.active {
+  background: rgba(109, 160, 239, 0.2);
+  border-color: rgba(190, 220, 255, 0.32);
+}
+
+.drive-breadcrumb.ghost {
+  color: var(--text-muted);
+}
+
+.drive-browser-current {
+  padding: 12px 16px 0;
+  display: grid;
+  gap: 3px;
+}
+
+.drive-browser-current-label {
+  color: var(--text-muted);
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.drive-browser-current strong {
+  font-size: 1rem;
+}
+
+.drive-browser-stage {
+  padding: 14px 16px 16px;
+}
+
+.drive-browser-list {
+  display: grid;
+  gap: 8px;
+  max-height: 460px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.drive-browser-row {
+  border: 1px solid rgba(173, 202, 242, 0.16);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.03);
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  padding: 10px;
+}
+
+.drive-browser-row.folder.selected {
+  border-color: rgba(196, 223, 255, 0.45);
+  background:
+    linear-gradient(145deg, rgba(88, 125, 186, 0.2), rgba(255, 255, 255, 0.03));
+  box-shadow: inset 0 0 0 1px rgba(132, 182, 255, 0.14);
+}
+
+.drive-browser-row-main {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+.drive-browser-row-main.passive {
+  cursor: default;
+}
+
+.drive-browser-row-copy {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.drive-browser-row-copy strong {
+  font-size: 0.9rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.drive-browser-row-copy span {
+  color: var(--text-muted);
+  font-size: 0.77rem;
+  line-height: 1.45;
+}
+
+.drive-browser-badge {
+  flex-shrink: 0;
+  min-width: 58px;
+  padding: 7px 8px;
+  border-radius: 10px;
+  border: 1px solid rgba(173, 202, 242, 0.18);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-primary);
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-align: center;
+}
+
+.drive-browser-badge.folder {
+  background: rgba(103, 163, 255, 0.12);
+  border-color: rgba(163, 205, 255, 0.24);
+}
+
+.drive-browser-badge.resume {
+  background: rgba(90, 172, 123, 0.18);
+  border-color: rgba(133, 212, 164, 0.24);
+}
+
+.drive-browser-badge.sheet {
+  background: rgba(84, 149, 120, 0.16);
+  border-color: rgba(114, 208, 161, 0.2);
+}
+
+.drive-browser-open {
+  flex-shrink: 0;
+  align-self: center;
+  border-radius: 10px;
+  border: 1px solid rgba(173, 202, 242, 0.18);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-primary);
+  padding: 8px 12px;
+}
+
+.drive-browser-empty {
+  min-height: 240px;
+  border-radius: 14px;
+  border: 1px dashed rgba(173, 202, 242, 0.22);
+  background: rgba(255, 255, 255, 0.02);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 18px;
+  text-align: center;
+}
+
+.drive-browser-empty strong {
+  font-size: 0.95rem;
+}
+
+.drive-browser-empty span {
+  max-width: 460px;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.drive-browser-empty.error {
+  border-style: solid;
+  border-color: rgba(232, 145, 145, 0.25);
+}
+
+.drive-selection-strip {
+  margin-bottom: 12px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(173, 202, 242, 0.18);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.drive-selection-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.drive-selection-label {
+  color: var(--text-muted);
+  font-size: 0.74rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.drive-selection-copy strong {
+  font-size: 0.92rem;
+}
+
+.drive-selection-meta {
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  word-break: break-word;
+}
+
 .jobs-card .jobs-layout {
   display: grid;
   grid-template-columns: 300px 1fr;
@@ -529,6 +822,22 @@ th {
   .jobs-card .jobs-layout,
   .settings-card .settings-grid {
     grid-template-columns: 1fr;
+  }
+
+  .drive-browser-topbar {
+    flex-direction: column;
+  }
+
+  .drive-browser-stats {
+    justify-content: flex-start;
+  }
+
+  .drive-browser-row {
+    flex-direction: column;
+  }
+
+  .drive-browser-open {
+    align-self: flex-start;
   }
 
   .account-dropdown {

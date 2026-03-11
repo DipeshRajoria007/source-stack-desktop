@@ -48,10 +48,35 @@ pub struct BatchParseRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DriveFolderEntry {
+    pub id: String,
+    pub name: String,
+    pub mime_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DriveFileRef {
     pub id: String,
     pub name: String,
     pub mime_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DriveBrowserFile {
+    pub id: String,
+    pub name: String,
+    pub mime_type: String,
+    pub size: Option<String>,
+    pub modified_time: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DrivePathEntry {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

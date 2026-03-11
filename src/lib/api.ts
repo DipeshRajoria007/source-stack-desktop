@@ -3,6 +3,9 @@ import type {
   AuthStatus,
   BatchParseRequest,
   CommandOk,
+  DriveBrowserFile,
+  DriveFolderEntry,
+  DrivePathEntry,
   GoogleSignInResult,
   JobStatus,
   ManualAuthChallenge,
@@ -65,6 +68,24 @@ export async function googleAuthSignOut(): Promise<CommandOk> {
 
 export async function googleAuthStatus(): Promise<AuthStatus> {
   return invoke<AuthStatus>("google_auth_status");
+}
+
+export async function listDriveFolders(
+  parentFolderId?: string,
+): Promise<DriveFolderEntry[]> {
+  return invoke<DriveFolderEntry[]>("list_drive_folders", { parentFolderId });
+}
+
+export async function listDriveFiles(
+  folderId: string,
+): Promise<DriveBrowserFile[]> {
+  return invoke<DriveBrowserFile[]>("list_drive_files", { folderId });
+}
+
+export async function getDriveFolderPath(
+  folderId: string,
+): Promise<DrivePathEntry[]> {
+  return invoke<DrivePathEntry[]>("get_drive_folder_path", { folderId });
 }
 
 export async function getSettings(): Promise<RuntimeSettingsView> {

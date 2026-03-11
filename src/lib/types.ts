@@ -22,6 +22,25 @@ export interface BatchParseRequest {
   spreadsheetId?: string | null;
 }
 
+export interface DriveFolderEntry {
+  id: string;
+  name: string;
+  mimeType: string;
+}
+
+export interface DriveBrowserFile {
+  id: string;
+  name: string;
+  mimeType: string;
+  size?: string | null;
+  modifiedTime?: string | null;
+}
+
+export interface DrivePathEntry {
+  id: string;
+  name: string;
+}
+
 export interface JobStatus {
   jobId: string;
   status: JobProcessingState;
