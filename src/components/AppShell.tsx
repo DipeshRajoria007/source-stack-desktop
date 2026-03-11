@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 
 import type { AuthStatus } from "../lib/types";
-import { formatDateTime, truncateMiddle } from "../lib/utils";
+import { formatDateTime } from "../lib/utils";
 
 export type AppView = "dashboard" | "jobs" | "settings";
 export type StatusTone = "neutral" | "info" | "success" | "error";
@@ -190,19 +190,31 @@ function AccountChip({
   return (
     <div className="relative shrink-0" ref={containerRef}>
       <button
-        className="flex h-8 items-center gap-2 rounded-full border border-white/8 bg-white/3 px-2.5 transition-colors hover:border-white/14 hover:bg-white/6"
+        aria-label={auth.signedIn ? "Open Google account menu" : "Open account menu"}
+        className="group relative flex h-9 w-9 items-center justify-center rounded-full border border-white/8 bg-white/3 transition-colors hover:border-white/14 hover:bg-white/6"
         disabled={busy}
         onClick={() => setOpen((value) => !value)}
+        title={auth.signedIn ? auth.email ?? auth.name ?? "Connected account" : "Not signed in"}
         type="button"
       >
         <span
-          className="h-2 w-2 rounded-full"
+          className="absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full border border-[var(--app-panel-strong)]"
           style={{
             backgroundColor: auth.signedIn ? "var(--app-success)" : "var(--app-subtle)",
           }}
         />
-        <span className="max-w-[180px] truncate text-xs text-[var(--app-foreground)]">
-          {auth.signedIn ? truncateMiddle(auth.email ?? auth.name ?? "Signed in") : "Not signed in"}
+        <span className="flex h-7 w-7 items-center justify-center overflow-hidden rounded-full bg-[var(--app-primary-soft)] text-xs font-semibold text-[var(--app-primary)]">
+          {auth.picture ? (
+            <img
+              alt={auth.email ?? auth.name ?? "Google account"}
+              className="h-full w-full object-cover"
+              src={auth.picture}
+            />
+          ) : auth.signedIn ? (
+            initials
+          ) : (
+            <CircleUserRound size={15} />
+          )}
         </span>
       </button>
 
