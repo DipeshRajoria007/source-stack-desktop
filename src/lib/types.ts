@@ -61,6 +61,8 @@ export interface RuntimeSettingsUpdate {
 export interface AuthStatus {
   signedIn: boolean;
   email?: string | null;
+  name?: string | null;
+  picture?: string | null;
   expiresAt?: string | null;
 }
 

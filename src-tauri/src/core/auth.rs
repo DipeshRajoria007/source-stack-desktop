@@ -48,6 +48,8 @@ struct GoogleTokenEnvelope {
     refresh_token: Option<String>,
     expires_at_utc: DateTime<Utc>,
     email: Option<String>,
+    name: Option<String>,
+    picture: Option<String>,
 }
 
 impl GoogleTokenEnvelope {
@@ -69,6 +71,8 @@ struct TokenResponse {
 #[derive(Debug, Deserialize)]
 struct UserInfoResponse {
     email: Option<String>,
+    name: Option<String>,
+    picture: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -145,6 +149,8 @@ impl GoogleAuthService {
                     status: AuthStatus {
                         signed_in: true,
                         email: token.email,
+                        name: token.name,
+                        picture: token.picture,
                         expires_at: Some(token.expires_at_utc),
                     },
                 })
@@ -230,6 +236,8 @@ impl GoogleAuthService {
         Ok(AuthStatus {
             signed_in: true,
             email: token.email,
+            name: token.name,
+            picture: token.picture,
             expires_at: Some(token.expires_at_utc),
         })
     }
@@ -246,6 +254,8 @@ impl GoogleAuthService {
             return Ok(AuthStatus {
                 signed_in: true,
                 email: token.email,
+                name: token.name,
+                picture: token.picture,
                 expires_at: Some(token.expires_at_utc),
             });
         }
@@ -253,6 +263,8 @@ impl GoogleAuthService {
         Ok(AuthStatus {
             signed_in: false,
             email: None,
+            name: None,
+            picture: None,
             expires_at: None,
         })
     }
@@ -279,7 +291,16 @@ impl GoogleAuthService {
         })?;
 
         match self.refresh_token(settings, &refresh_token).await {
-            Ok(refreshed) => {
+            Ok(mut refreshed) => {
+                if refreshed.email.is_none() {
+                    refreshed.email = cached.email.clone();
+                }
+                if refreshed.name.is_none() {
+                    refreshed.name = cached.name.clone();
+                }
+                if refreshed.picture.is_none() {
+                    refreshed.picture = cached.picture.clone();
+                }
                 self.save_token(&refreshed)?;
                 Ok(refreshed.access_token)
             }
@@ -377,7 +398,7 @@ impl GoogleAuthService {
 
         let payload = serde_json::from_str::<TokenResponse>(&body)?;
         let expires_at = Utc::now() + chrono::Duration::seconds(payload.expires_in);
-        let email = self.fetch_user_email(&payload.access_token).await.ok();
+        let profile = self.fetch_user_profile(&payload.access_token).await.ok();
 
         Ok(GoogleTokenEnvelope {
             access_token: payload.access_token,
@@ -385,7 +406,9 @@ impl GoogleAuthService {
                 .refresh_token
                 .or_else(|| Some(refresh_token.to_string())),
             expires_at_utc: expires_at,
-            email,
+            email: profile.as_ref().and_then(|value| value.email.clone()),
+            name: profile.as_ref().and_then(|value| value.name.clone()),
+            picture: profile.and_then(|value| value.picture),
         })
     }
 
@@ -546,17 +569,19 @@ impl GoogleAuthService {
 
         let payload = serde_json::from_str::<TokenResponse>(&body)?;
         let expires_at = Utc::now() + chrono::Duration::seconds(payload.expires_in);
-        let email = self.fetch_user_email(&payload.access_token).await.ok();
+        let profile = self.fetch_user_profile(&payload.access_token).await.ok();
 
         Ok(GoogleTokenEnvelope {
             access_token: payload.access_token,
             refresh_token: payload.refresh_token.or(fallback_refresh_token),
             expires_at_utc: expires_at,
-            email,
+            email: profile.as_ref().and_then(|value| value.email.clone()),
+            name: profile.as_ref().and_then(|value| value.name.clone()),
+            picture: profile.and_then(|value| value.picture),
         })
     }
 
-    async fn fetch_user_email(&self, access_token: &str) -> anyhow::Result<String> {
+    async fn fetch_user_profile(&self, access_token: &str) -> anyhow::Result<UserInfoResponse> {
         let response = self
             .client
             .get(&self.endpoints.userinfo)
@@ -568,10 +593,10 @@ impl GoogleAuthService {
             return Err(anyhow::anyhow!("userinfo endpoint failed"));
         }
 
-        let payload = response.json::<UserInfoResponse>().await?;
-        payload
-            .email
-            .ok_or_else(|| anyhow::anyhow!("userinfo did not return email"))
+        response
+            .json::<UserInfoResponse>()
+            .await
+            .map_err(Into::into)
     }
 
     async fn cleanup_expired_manual_sessions(&self) {
@@ -993,6 +1018,11 @@ mod tests {
 
         assert_eq!(token.access_token, "access-token");
         assert_eq!(token.email.as_deref(), Some("dev@example.com"));
+        assert_eq!(token.name.as_deref(), Some("Dev Example"));
+        assert_eq!(
+            token.picture.as_deref(),
+            Some("https://lh3.googleusercontent.com/a/dev-photo")
+        );
     }
 
     struct MockResponse {
@@ -1025,7 +1055,7 @@ mod tests {
             Self {
                 path: "/userinfo",
                 status: 200,
-                body: r#"{"email":"dev@example.com"}"#,
+                body: r#"{"email":"dev@example.com","name":"Dev Example","picture":"https://lh3.googleusercontent.com/a/dev-photo"}"#,
                 content_type: "application/json",
             }
         }
