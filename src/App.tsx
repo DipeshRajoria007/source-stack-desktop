@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import "./App.css";
+import { DriveFolderBrowser } from "./components/DriveFolderBrowser";
 import {
   cancelJob,
   getJobResults,
@@ -51,7 +52,10 @@ function App() {
   const [parseLoading, setParseLoading] = useState(false);
   const [parseResult, setParseResult] = useState<ParsedCandidate | null>(null);
 
-  const [folderId, setFolderId] = useState("");
+  const [selectedDriveFolder, setSelectedDriveFolder] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
   const [spreadsheetId, setSpreadsheetId] = useState("");
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [jobStatus, setJobStatus] = useState<JobStatus | null>(null);
@@ -86,6 +90,14 @@ function App() {
     return () => clearInterval(interval);
   }, [activeJobId]);
 
+  useEffect(() => {
+    if (auth.signedIn) {
+      return;
+    }
+
+    setSelectedDriveFolder(null);
+  }, [auth.signedIn]);
+
   const progressText = useMemo(() => {
     if (!jobStatus) {
       return "No active job";
@@ -93,6 +105,14 @@ function App() {
 
     return `${jobStatus.status} • ${jobStatus.progress}% • ${jobStatus.processedFiles}/${jobStatus.totalFiles} files`;
   }, [jobStatus]);
+
+  const driveBrowsingLocked = Boolean(
+    activeJobId &&
+      (!jobStatus ||
+        (jobStatus.status !== "completed" &&
+          jobStatus.status !== "failed" &&
+          jobStatus.status !== "revoked")),
+  );
 
   async function bootstrap() {
     let loadedSettings = defaultSettings;
@@ -163,15 +183,15 @@ function App() {
   }
 
   async function handleStartBatchJob() {
-    if (!folderId.trim()) {
-      setMessage("Google Drive folder ID is required");
+    if (!selectedDriveFolder?.id) {
+      setMessage("Select a Google Drive folder before starting a batch job.");
       return;
     }
 
     setMessage("Queueing batch job...");
     try {
       const response = await startBatchJob({
-        folderId: folderId.trim(),
+        folderId: selectedDriveFolder.id,
         spreadsheetId: spreadsheetId.trim() ? spreadsheetId.trim() : undefined,
       });
 
@@ -524,16 +544,26 @@ function App() {
 
             <article className="card">
               <h2>Drive Batch Parse</h2>
-              <p>Run an async local job against a Google Drive folder.</p>
+              <p>Browse your Drive inside SourceStack and choose the folder to process.</p>
 
-              <label className="field">
-                <span>Drive Folder ID</span>
-                <input
-                  value={folderId}
-                  onChange={(e) => setFolderId(e.target.value)}
-                  placeholder="Folder ID"
-                />
-              </label>
+              <DriveFolderBrowser
+                authSignedIn={auth.signedIn}
+                disabled={driveBrowsingLocked}
+                selectedFolderId={selectedDriveFolder?.id}
+                onFolderSelect={(id, name) => setSelectedDriveFolder({ id, name })}
+              />
+
+              <div className="drive-selection-strip">
+                <div className="drive-selection-copy">
+                  <span className="drive-selection-label">Selected folder</span>
+                  <strong>{selectedDriveFolder?.name ?? "No folder selected"}</strong>
+                  <span className="drive-selection-meta">
+                    {selectedDriveFolder
+                      ? "Ready to process the folder you selected in the Drive browser."
+                      : "Choose a folder from the Drive browser above."}
+                  </span>
+                </div>
+              </div>
 
               <label className="field">
                 <span>Spreadsheet ID (optional)</span>
@@ -547,6 +577,7 @@ function App() {
               <div className="button-row">
                 <button
                   className="primary"
+                  disabled={!selectedDriveFolder?.id || driveBrowsingLocked}
                   onClick={() => void handleStartBatchJob()}
                 >
                   Start Batch Job
@@ -564,6 +595,11 @@ function App() {
 
               {activeJobId && (
                 <div className="job-box">
+                  {selectedDriveFolder?.name && (
+                    <p>
+                      <strong>Folder:</strong> {selectedDriveFolder.name}
+                    </p>
+                  )}
                   <p>
                     <strong>Active Job:</strong> {activeJobId}
                   </p>
