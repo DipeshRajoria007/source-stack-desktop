@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::fs;
 use std::io::{ErrorKind, Read, Write};
 use std::net::TcpListener;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -22,9 +24,11 @@ use super::models::{
     resolve_env_value, AuthStatus, GoogleSignInResult, ManualAuthChallenge,
     ManualAuthCompleteRequest, RuntimeSettings,
 };
+use super::settings_store::app_data_root;
 
 const TOKEN_KEYRING_SERVICE: &str = "com.sourcestack.desktop.google";
 const TOKEN_KEYRING_USERNAME: &str = "default";
+const TOKEN_CACHE_FILE: &str = "google-auth-token.json";
 
 const DEFAULT_AUTH_AUTHORIZE: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const DEFAULT_AUTH_TOKEN: &str = "https://oauth2.googleapis.com/token";
@@ -327,6 +331,71 @@ impl GoogleAuthService {
     }
 
     fn load_token(&self) -> anyhow::Result<Option<GoogleTokenEnvelope>> {
+        match self.load_token_from_keyring() {
+            Ok(Some(token)) => Ok(Some(token)),
+            Ok(None) => {
+                let token = load_token_from_file_path(&token_cache_path())?;
+                if let Some(ref value) = token {
+                    let _ = self.save_token_to_keyring(value);
+                }
+                Ok(token)
+            }
+            Err(keyring_error) => {
+                if let Some(token) = load_token_from_file_path(&token_cache_path())? {
+                    eprintln!(
+                        "google auth: keychain read failed, using local token cache: {keyring_error}"
+                    );
+                    return Ok(Some(token));
+                }
+
+                Err(keyring_error)
+            }
+        }
+    }
+
+    fn save_token(&self, token: &GoogleTokenEnvelope) -> anyhow::Result<()> {
+        let keyring_result = self.save_token_to_keyring(token);
+        let file_result = save_token_to_file_path(&token_cache_path(), token);
+
+        match (&keyring_result, &file_result) {
+            (Ok(()), _) | (_, Ok(())) => {
+                if let Err(err) = keyring_result {
+                    eprintln!("google auth: keychain write failed, kept local token cache: {err}");
+                }
+                if let Err(err) = file_result {
+                    eprintln!("google auth: local token cache write failed: {err}");
+                }
+                Ok(())
+            }
+            (Err(keyring_error), Err(file_error)) => Err(anyhow::anyhow!(
+                "failed to persist Google auth token in keychain and {}: {keyring_error}; {file_error}",
+                token_cache_path().display()
+            )),
+        }
+    }
+
+    fn clear_token(&self) -> anyhow::Result<()> {
+        let keyring_result = self.clear_token_from_keyring();
+        let file_result = clear_token_file_path(&token_cache_path());
+
+        match (&keyring_result, &file_result) {
+            (Ok(()), _) | (_, Ok(())) => {
+                if let Err(err) = keyring_result {
+                    eprintln!("google auth: keychain delete failed, cleared local token cache: {err}");
+                }
+                if let Err(err) = file_result {
+                    eprintln!("google auth: local token cache delete failed: {err}");
+                }
+                Ok(())
+            }
+            (Err(keyring_error), Err(file_error)) => Err(anyhow::anyhow!(
+                "failed to clear Google auth token from keychain and {}: {keyring_error}; {file_error}",
+                token_cache_path().display()
+            )),
+        }
+    }
+
+    fn load_token_from_keyring(&self) -> anyhow::Result<Option<GoogleTokenEnvelope>> {
         let entry = keyring::Entry::new(TOKEN_KEYRING_SERVICE, TOKEN_KEYRING_USERNAME)?;
         let raw = match entry.get_password() {
             Ok(value) => value,
@@ -338,14 +407,14 @@ impl GoogleAuthService {
         Ok(Some(token))
     }
 
-    fn save_token(&self, token: &GoogleTokenEnvelope) -> anyhow::Result<()> {
+    fn save_token_to_keyring(&self, token: &GoogleTokenEnvelope) -> anyhow::Result<()> {
         let entry = keyring::Entry::new(TOKEN_KEYRING_SERVICE, TOKEN_KEYRING_USERNAME)?;
         let json = serde_json::to_string(token)?;
         entry.set_password(&json)?;
         Ok(())
     }
 
-    fn clear_token(&self) -> anyhow::Result<()> {
+    fn clear_token_from_keyring(&self) -> anyhow::Result<()> {
         let entry = keyring::Entry::new(TOKEN_KEYRING_SERVICE, TOKEN_KEYRING_USERNAME)?;
         match entry.delete_credential() {
             Ok(_) | Err(keyring::Error::NoEntry) => Ok(()),
@@ -603,6 +672,62 @@ impl GoogleAuthService {
         let now = Utc::now();
         let mut sessions = self.manual_sessions.lock().await;
         sessions.retain(|_, session| session.expires_at > now);
+    }
+}
+
+fn token_cache_path() -> PathBuf {
+    app_data_root().join(TOKEN_CACHE_FILE)
+}
+
+fn load_token_from_file_path(path: &Path) -> anyhow::Result<Option<GoogleTokenEnvelope>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("failed to read token cache {}", path.display()))?;
+    let token = serde_json::from_str::<GoogleTokenEnvelope>(&raw)
+        .with_context(|| format!("invalid token cache JSON in {}", path.display()))?;
+    Ok(Some(token))
+}
+
+fn save_token_to_file_path(path: &Path, token: &GoogleTokenEnvelope) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create token cache directory {}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let json = serde_json::to_string(token)?;
+    fs::write(path, json)
+        .with_context(|| format!("failed to write token cache {}", path.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let permissions = fs::Permissions::from_mode(0o600);
+        fs::set_permissions(path, permissions).with_context(|| {
+            format!(
+                "failed to secure token cache permissions {}",
+                path.display()
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+fn clear_token_file_path(path: &Path) -> anyhow::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => {
+            Err(err).with_context(|| format!("failed to delete token cache {}", path.display()))
+        }
     }
 }
 
@@ -890,6 +1015,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use tempfile::tempdir;
 
     fn test_settings() -> RuntimeSettings {
         RuntimeSettings {
@@ -901,6 +1027,17 @@ mod tests {
             max_retries: 3,
             retry_delay_seconds: 1.0,
             job_retention_hours: 24,
+        }
+    }
+
+    fn example_token() -> GoogleTokenEnvelope {
+        GoogleTokenEnvelope {
+            access_token: "access-token".to_string(),
+            refresh_token: Some("refresh-token".to_string()),
+            expires_at_utc: Utc::now() + chrono::Duration::hours(1),
+            email: Some("dev@example.com".to_string()),
+            name: Some("Dev Example".to_string()),
+            picture: Some("https://lh3.googleusercontent.com/a/dev-photo".to_string()),
         }
     }
 
@@ -918,6 +1055,25 @@ mod tests {
     fn parse_callback_raw_code_is_supported() {
         let code = parse_callback_url_or_code("raw-code-123", "ignored").unwrap();
         assert_eq!(code, "raw-code-123");
+    }
+
+    #[test]
+    fn token_file_cache_round_trips() {
+        let temp_dir = tempdir().unwrap();
+        let token_path = temp_dir.path().join("google-auth-token.json");
+        let token = example_token();
+
+        save_token_to_file_path(&token_path, &token).unwrap();
+        let loaded = load_token_from_file_path(&token_path).unwrap().unwrap();
+
+        assert_eq!(loaded.access_token, token.access_token);
+        assert_eq!(loaded.refresh_token, token.refresh_token);
+        assert_eq!(loaded.email, token.email);
+        assert_eq!(loaded.name, token.name);
+        assert_eq!(loaded.picture, token.picture);
+
+        clear_token_file_path(&token_path).unwrap();
+        assert!(load_token_from_file_path(&token_path).unwrap().is_none());
     }
 
     #[test]

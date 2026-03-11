@@ -95,24 +95,31 @@ function App() {
   }, [jobStatus]);
 
   async function bootstrap() {
+    let loadedSettings = defaultSettings;
+    let initMessage = "Workspace ready";
+
     try {
-      const [loadedSettings, loadedAuth] = await Promise.all([
-        getSettings(),
-        googleAuthStatus(),
-      ]);
+      loadedSettings = await getSettings();
       setSettings(loadedSettings);
-      setAuth(loadedAuth);
-      await refreshJobs();
-      if (!loadedSettings.googleClientId.trim()) {
-        setMessage(
-          "This app build is missing Google OAuth configuration. Contact Dipesh from engineering team.",
-        );
-      } else {
-        setMessage("Workspace ready");
-      }
     } catch (error) {
-      setMessage(`Failed to initialize: ${String(error)}`);
+      initMessage = `Failed to load settings: ${String(error)}`;
     }
+
+    try {
+      const loadedAuth = await googleAuthStatus();
+      setAuth(loadedAuth);
+    } catch (error) {
+      initMessage = `Failed to restore Google session: ${String(error)}`;
+    }
+
+    await refreshJobs();
+
+    if (!loadedSettings.googleClientId.trim()) {
+      initMessage =
+        "This app build is missing Google OAuth configuration. Contact Dipesh from engineering team.";
+    }
+
+    setMessage(initMessage);
   }
 
   async function refreshJobs() {
