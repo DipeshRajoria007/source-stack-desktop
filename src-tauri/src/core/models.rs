@@ -1,5 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -285,18 +288,94 @@ fn default_tesseract_path() -> String {
 }
 
 fn default_google_client_id() -> String {
-    option_env!("SOURCESTACK_GOOGLE_CLIENT_ID")
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
+    resolve_env_value("SOURCESTACK_GOOGLE_CLIENT_ID")
+        .or_else(|| resolve_env_value("GOOGLE_CLIENT_ID"))
         .unwrap_or_default()
-        .to_string()
 }
 
 pub fn default_google_client_secret() -> Option<String> {
-    option_env!("SOURCESTACK_GOOGLE_CLIENT_SECRET")
-        .map(str::trim)
+    resolve_env_value("SOURCESTACK_GOOGLE_CLIENT_SECRET")
+        .or_else(|| resolve_env_value("GOOGLE_CLIENT_SECRET"))
+}
+
+pub(crate) fn resolve_env_value(key: &str) -> Option<String> {
+    let build_time = match key {
+        "SOURCESTACK_GOOGLE_CLIENT_ID" => option_env!("SOURCESTACK_GOOGLE_CLIENT_ID"),
+        "GOOGLE_CLIENT_ID" => option_env!("GOOGLE_CLIENT_ID"),
+        "SOURCESTACK_GOOGLE_CLIENT_SECRET" => option_env!("SOURCESTACK_GOOGLE_CLIENT_SECRET"),
+        "GOOGLE_CLIENT_SECRET" => option_env!("GOOGLE_CLIENT_SECRET"),
+        _ => None,
+    };
+
+    if let Some(value) = build_time {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    std::env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
-        .map(str::to_string)
+        .or_else(|| resolve_env_from_files(key))
+}
+
+fn resolve_env_from_files(key: &str) -> Option<String> {
+    for file in candidate_env_files() {
+        if let Some(value) = read_env_value_from_file(&file, key) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn candidate_env_files() -> Vec<PathBuf> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut roots = Vec::new();
+    roots.push(cwd.clone());
+    roots.extend(cwd.ancestors().map(Path::to_path_buf));
+
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for root in roots {
+        for candidate in [
+            root.join(".env.local"),
+            root.join(".env"),
+            root.join("source-stack-web/.env.local"),
+            root.join("source-stack-web/.env"),
+            root.join("source-stack-api/.env.local"),
+            root.join("source-stack-api/.env"),
+        ] {
+            if seen.insert(candidate.clone()) {
+                out.push(candidate);
+            }
+        }
+    }
+
+    out
+}
+
+fn read_env_value_from_file(path: &Path, key: &str) -> Option<String> {
+    let content = fs::read_to_string(path).ok()?;
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let line = line.strip_prefix("export ").unwrap_or(line).trim();
+        let (k, v) = line.split_once('=')?;
+        if k.trim() != key {
+            continue;
+        }
+
+        let value = v.trim().trim_matches('"').trim_matches('\'').to_string();
+        if !value.is_empty() {
+            return Some(value);
+        }
+    }
+    None
 }
 
 fn default_max_concurrent_requests() -> usize {

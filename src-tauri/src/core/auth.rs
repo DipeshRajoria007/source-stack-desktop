@@ -19,7 +19,8 @@ use uuid::Uuid;
 
 use super::errors::{AuthErrorCode, CoreError};
 use super::models::{
-    AuthStatus, GoogleSignInResult, ManualAuthChallenge, ManualAuthCompleteRequest, RuntimeSettings,
+    resolve_env_value, AuthStatus, GoogleSignInResult, ManualAuthChallenge,
+    ManualAuthCompleteRequest, RuntimeSettings,
 };
 
 const TOKEN_KEYRING_SERVICE: &str = "com.sourcestack.desktop.google";
@@ -28,6 +29,7 @@ const TOKEN_KEYRING_USERNAME: &str = "default";
 const DEFAULT_AUTH_AUTHORIZE: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const DEFAULT_AUTH_TOKEN: &str = "https://oauth2.googleapis.com/token";
 const DEFAULT_USERINFO: &str = "https://www.googleapis.com/oauth2/v2/userinfo";
+const DEFAULT_WEB_REDIRECT_PATH: &str = "/api/auth/callback/google";
 
 const MANUAL_SESSION_TTL_SECONDS: i64 = 10 * 60;
 const LOOPBACK_WAIT_SECONDS: u64 = 90;
@@ -391,15 +393,30 @@ impl GoogleAuthService {
         &self,
         settings: &RuntimeSettings,
     ) -> anyhow::Result<GoogleTokenEnvelope> {
-        let listener = TcpListener::bind("127.0.0.1:0").map_err(|_| {
-            CoreError::auth(
-                AuthErrorCode::LoopbackUnavailable,
-                "Local OAuth callback listener is unavailable.",
-            )
-        })?;
-        let port = listener.local_addr()?.port();
+        let configured_redirect = resolve_configured_redirect_uri();
+        let (listener, session) = if let Some(redirect_uri) = configured_redirect {
+            let port = parse_loopback_redirect_port(&redirect_uri)?;
+            let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|_| {
+                CoreError::auth(
+                    AuthErrorCode::LoopbackUnavailable,
+                    format!("Local OAuth callback listener on port {port} is unavailable."),
+                )
+            })?;
+            let session = self.create_session_with_redirect_uri(settings, redirect_uri)?;
+            (listener, session)
+        } else {
+            let listener = TcpListener::bind("127.0.0.1:0").map_err(|_| {
+                CoreError::auth(
+                    AuthErrorCode::LoopbackUnavailable,
+                    "Local OAuth callback listener is unavailable.",
+                )
+            })?;
+            let port = listener.local_addr()?.port();
+            let session = self.create_session_with_redirect(settings, port)?;
+            (listener, session)
+        };
 
-        let session = self.create_session_with_redirect(settings, port)?;
+        let port = listener.local_addr()?.port();
         open_auth_url(&session.authorize_url).map_err(|_| {
             CoreError::auth(
                 AuthErrorCode::LoopbackUnavailable,
@@ -434,6 +451,10 @@ impl GoogleAuthService {
         &self,
         settings: &RuntimeSettings,
     ) -> anyhow::Result<ManualAuthSession> {
+        if let Some(redirect_uri) = resolve_configured_redirect_uri() {
+            return self.create_session_with_redirect_uri(settings, redirect_uri);
+        }
+
         let mut rng = rand::rng();
         let fallback_port: u16 = rng.random_range(49152..65000);
         self.create_session_with_redirect(settings, fallback_port)
@@ -444,16 +465,24 @@ impl GoogleAuthService {
         settings: &RuntimeSettings,
         port: u16,
     ) -> anyhow::Result<ManualAuthSession> {
+        let redirect_uri = format!("http://127.0.0.1:{port}/callback/");
+        self.create_session_with_redirect_uri(settings, redirect_uri)
+    }
+
+    fn create_session_with_redirect_uri(
+        &self,
+        settings: &RuntimeSettings,
+        redirect_uri: String,
+    ) -> anyhow::Result<ManualAuthSession> {
         let state = Uuid::new_v4().to_string();
         let code_verifier = generate_code_verifier();
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
-        let redirect_uri = format!("http://127.0.0.1:{port}/callback/");
         let authorize_url = build_authorize_url(
             &self.endpoints.authorize,
             settings,
             &state,
             &challenge,
-            &redirect_uri,
+            redirect_uri.as_str(),
         )?
         .to_string();
 
@@ -576,6 +605,53 @@ fn build_authorize_url(
     )?;
 
     Ok(url)
+}
+
+fn resolve_configured_redirect_uri() -> Option<String> {
+    if let Some(uri) = resolve_env_value("SOURCESTACK_GOOGLE_REDIRECT_URI")
+        .or_else(|| resolve_env_value("GOOGLE_REDIRECT_URI"))
+    {
+        return Some(uri);
+    }
+
+    resolve_env_value("AUTH_URL").map(|base| {
+        let trimmed = base.trim_end_matches('/');
+        format!("{trimmed}{DEFAULT_WEB_REDIRECT_PATH}")
+    })
+}
+
+fn parse_loopback_redirect_port(redirect_uri: &str) -> anyhow::Result<u16> {
+    let parsed = Url::parse(redirect_uri).map_err(|_| {
+        CoreError::auth(
+            AuthErrorCode::LoopbackUnavailable,
+            "Configured OAuth redirect URI is invalid.",
+        )
+    })?;
+
+    if parsed.scheme() != "http" {
+        return Err(CoreError::auth(
+            AuthErrorCode::LoopbackUnavailable,
+            "Configured OAuth redirect URI must use http.",
+        )
+        .into());
+    }
+
+    let host = parsed.host_str().unwrap_or_default();
+    if host != "127.0.0.1" && host != "localhost" {
+        return Err(CoreError::auth(
+            AuthErrorCode::LoopbackUnavailable,
+            "Configured OAuth redirect URI must target localhost or 127.0.0.1.",
+        )
+        .into());
+    }
+
+    parsed.port_or_known_default().ok_or_else(|| {
+        CoreError::auth(
+            AuthErrorCode::LoopbackUnavailable,
+            "Configured OAuth redirect URI must include a port.",
+        )
+        .into()
+    })
 }
 
 fn generate_code_verifier() -> String {
