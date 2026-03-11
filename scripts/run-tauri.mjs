@@ -8,6 +8,8 @@ const home = env.HOME || env.USERPROFILE || homedir();
 const isWindows = process.platform === "win32";
 const cargoExe = isWindows ? "cargo.exe" : "cargo";
 const tauriCmd = isWindows ? "tauri.cmd" : "tauri";
+const localTauriCmd = join(process.cwd(), "node_modules", ".bin", tauriCmd);
+const tauriExecutable = existsSync(localTauriCmd) ? localTauriCmd : tauriCmd;
 
 const candidateDirs = [
   join(home, ".cargo", "bin"),
@@ -31,7 +33,7 @@ if (!env.CARGO) {
   }
 }
 
-const child = spawn(tauriCmd, process.argv.slice(2), {
+const child = spawn(tauriExecutable, process.argv.slice(2), {
   stdio: "inherit",
   env,
   // Windows command shims like `tauri.cmd` need a shell to spawn correctly.
