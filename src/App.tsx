@@ -244,12 +244,24 @@ export default function App() {
       return;
     }
 
-    const shouldLoadResults =
+    const hasRecordedResults =
       (selectedJobStatus.resultsCount ?? 0) > 0 || selectedJobStatus.processedFiles > 0;
+    const canLoadSavedResults =
+      selectedJobStatus.status === "completed" || selectedJobStatus.status === "revoked";
+    const stateMessage = getJobResultsStateMessage(selectedJobStatus);
 
-    if (!shouldLoadResults) {
+    if (!canLoadSavedResults) {
       setSelectedJobResults([]);
-      setSelectedJobResultsError(null);
+      setSelectedJobResultsError(
+        hasRecordedResults || selectedJobStatus.status === "failed" ? stateMessage : null,
+      );
+      setSelectedJobResultsLoading(false);
+      return;
+    }
+
+    if (!hasRecordedResults) {
+      setSelectedJobResults([]);
+      setSelectedJobResultsError(selectedJobStatus.status === "revoked" ? stateMessage : null);
       setSelectedJobResultsLoading(false);
       return;
     }
@@ -272,7 +284,7 @@ export default function App() {
         }
 
         setSelectedJobResults([]);
-        setSelectedJobResultsError(String(error));
+        setSelectedJobResultsError(getJobResultsStateMessage(selectedJobStatus, error));
       })
       .finally(() => {
         if (selectedJobResultsRequestIdRef.current === requestId) {
@@ -753,6 +765,26 @@ export default function App() {
 
   function pushStatus(text: string, tone: StatusTone) {
     setWorkspaceStatus({ text, tone });
+  }
+
+  function getJobResultsStateMessage(status: JobStatus, error?: unknown) {
+    const rawError = error ? String(error) : null;
+
+    if (rawError && !rawError.toLowerCase().includes("not completed")) {
+      return rawError;
+    }
+
+    switch (status.status) {
+      case "pending":
+      case "processing":
+        return "This job is still running. Results will be available after it finishes.";
+      case "revoked":
+        return "This job was killed before completion, so no final results are available.";
+      case "failed":
+        return "This job failed before completion, so no results are available.";
+      default:
+        return rawError;
+    }
   }
 
   function markJobKilledLocally(jobId: string, message: string) {
