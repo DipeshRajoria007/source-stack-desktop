@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { homedir } from "node:os";
 
 const env = { ...process.env };
@@ -15,11 +15,13 @@ const tauriCliScript = join(
   "cli",
   "tauri.js",
 );
+const nodeBinDir = dirname(process.execPath);
 const localBinDir = join(process.cwd(), "node_modules", ".bin");
 const localTauriCmd = join(process.cwd(), "node_modules", ".bin", tauriCmd);
 const tauriExecutable = existsSync(localTauriCmd) ? localTauriCmd : tauriCmd;
 
 const candidateDirs = [
+  nodeBinDir,
   localBinDir,
   env.PNPM_HOME || "",
   join(home, ".cargo", "bin"),
