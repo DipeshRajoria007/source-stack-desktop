@@ -48,6 +48,10 @@ export async function cancelJob(jobId: string): Promise<CommandOk> {
   return invoke<CommandOk>("cancel_job", { jobId });
 }
 
+export async function killJob(jobId: string): Promise<CommandOk> {
+  return invoke<CommandOk>("kill_job", { jobId });
+}
+
 export async function googleAuthSignIn(): Promise<GoogleSignInResult> {
   return invoke<GoogleSignInResult>("google_auth_sign_in");
 }

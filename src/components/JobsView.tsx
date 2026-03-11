@@ -21,8 +21,10 @@ interface JobListItem {
 }
 
 interface JobsViewProps {
+  jobActionBusy: boolean;
   jobs: JobListItem[];
   jobsLoading: boolean;
+  onKillJob: (jobId: string) => void;
   onOpenDriveFile: (fileId: string) => void;
   onOpenSpreadsheet: (spreadsheetId: string) => void;
   onSelectJob: (jobId: string) => void;
@@ -42,8 +44,10 @@ type SortColumn =
   | "confidence";
 
 export function JobsView({
+  jobActionBusy,
   jobs,
   jobsLoading,
+  onKillJob,
   onOpenDriveFile,
   onOpenSpreadsheet,
   onSelectJob,
@@ -180,16 +184,30 @@ export function JobsView({
                 <JobStatusPill status={selectedJobStatus.status} />
               </div>
 
-              {selectedJobStatus.spreadsheetId && (
-                <button
-                  className="flex h-8 items-center gap-1 rounded-md bg-[var(--app-primary)] px-3 text-xs font-semibold text-[var(--app-bg)]"
-                  onClick={() => onOpenSpreadsheet(selectedJobStatus.spreadsheetId ?? "")}
-                  type="button"
-                >
-                  <ExternalLink size={12} />
-                  Open Sheet
-                </button>
-              )}
+              <div className="flex items-center gap-2">
+                {(selectedJobStatus.status === "pending" ||
+                  selectedJobStatus.status === "processing") && (
+                  <button
+                    className="flex h-8 items-center gap-1 rounded-md border border-red-500/20 bg-red-500/10 px-3 text-xs font-semibold text-red-200 transition-colors hover:bg-red-500/16 disabled:opacity-50"
+                    disabled={jobActionBusy}
+                    onClick={() => onKillJob(selectedJobStatus.jobId)}
+                    type="button"
+                  >
+                    Kill Job
+                  </button>
+                )}
+
+                {selectedJobStatus.spreadsheetId && (
+                  <button
+                    className="flex h-8 items-center gap-1 rounded-md bg-[var(--app-primary)] px-3 text-xs font-semibold text-[var(--app-bg)]"
+                    onClick={() => onOpenSpreadsheet(selectedJobStatus.spreadsheetId ?? "")}
+                    type="button"
+                  >
+                    <ExternalLink size={12} />
+                    Open Sheet
+                  </button>
+                )}
+              </div>
             </div>
 
             <div className="mb-3 flex flex-wrap gap-4 text-xs">

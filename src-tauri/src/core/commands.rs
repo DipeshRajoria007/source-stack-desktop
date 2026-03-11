@@ -87,6 +87,17 @@ pub async fn cancel_job(state: State<'_, AppState>, job_id: String) -> Result<Co
 }
 
 #[tauri::command]
+pub async fn kill_job(state: State<'_, AppState>, job_id: String) -> Result<CommandOk, String> {
+    let ok = state
+        .core
+        .kill_job(&job_id)
+        .await
+        .map_err(|err| err.to_string())?;
+
+    Ok(CommandOk { ok })
+}
+
+#[tauri::command]
 pub async fn google_auth_sign_in(state: State<'_, AppState>) -> Result<GoogleSignInResult, String> {
     state
         .core

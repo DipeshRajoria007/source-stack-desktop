@@ -61,6 +61,7 @@ interface DashboardViewProps {
   authBusy: boolean;
   driveBrowsingLocked: boolean;
   driveState: DriveBrowserState;
+  jobActionBusy: boolean;
   manualAuthChallenge: ManualAuthChallenge | null;
   manualAuthError: string;
   manualAuthInput: string;
@@ -72,6 +73,7 @@ interface DashboardViewProps {
   onCompleteManualAuth: () => void;
   onCopyManualAuthUrl: () => void;
   onDeselectDriveFolder: () => void;
+  onKillActiveJob: () => void;
   onManualAuthInputChange: (value: string) => void;
   onNavigateDrivePath: (folderId: string | null) => void;
   onOpenDriveFolder: (folder: DriveFolderEntry) => void;
@@ -136,6 +138,7 @@ export function DashboardView({
   authBusy,
   driveBrowsingLocked,
   driveState,
+  jobActionBusy,
   manualAuthChallenge,
   manualAuthError,
   manualAuthInput,
@@ -147,6 +150,7 @@ export function DashboardView({
   onCompleteManualAuth,
   onCopyManualAuthUrl,
   onDeselectDriveFolder,
+  onKillActiveJob,
   onManualAuthInputChange,
   onNavigateDrivePath,
   onOpenDriveFolder,
@@ -185,8 +189,10 @@ export function DashboardView({
             activeJobStatus={activeJobStatus}
             driveBrowsingLocked={driveBrowsingLocked}
             driveState={driveState}
+            jobActionBusy={jobActionBusy}
             onCancelActiveJob={onCancelActiveJob}
             onDeselectDriveFolder={onDeselectDriveFolder}
+            onKillActiveJob={onKillActiveJob}
             onNavigateDrivePath={onNavigateDrivePath}
             onOpenDriveFolder={onOpenDriveFolder}
             onRefreshActiveJob={onRefreshActiveJob}
@@ -237,8 +243,10 @@ function SignedInBatchPanel({
   activeJobStatus,
   driveBrowsingLocked,
   driveState,
+  jobActionBusy,
   onCancelActiveJob,
   onDeselectDriveFolder,
+  onKillActiveJob,
   onNavigateDrivePath,
   onOpenDriveFolder,
   onRefreshActiveJob,
@@ -254,8 +262,10 @@ function SignedInBatchPanel({
   activeJobStatus: JobStatus | null;
   driveBrowsingLocked: boolean;
   driveState: DriveBrowserState;
+  jobActionBusy: boolean;
   onCancelActiveJob: () => void;
   onDeselectDriveFolder: () => void;
+  onKillActiveJob: () => void;
   onNavigateDrivePath: (folderId: string | null) => void;
   onOpenDriveFolder: (folder: DriveFolderEntry) => void;
   onRefreshActiveJob: () => void;
@@ -488,13 +498,24 @@ function SignedInBatchPanel({
               </div>
 
               {activeJobBusy && (
-                <button
-                  className="text-xs text-[var(--app-danger)] transition-colors hover:text-red-300"
-                  onClick={onCancelActiveJob}
-                  type="button"
-                >
-                  Cancel Job
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    className="text-xs text-[var(--app-muted)] transition-colors hover:text-[var(--app-foreground)] disabled:opacity-50"
+                    disabled={jobActionBusy}
+                    onClick={onCancelActiveJob}
+                    type="button"
+                  >
+                    Cancel Job
+                  </button>
+                  <button
+                    className="text-xs text-[var(--app-danger)] transition-colors hover:text-red-300 disabled:opacity-50"
+                    disabled={jobActionBusy}
+                    onClick={onKillActiveJob}
+                    type="button"
+                  >
+                    Kill Job
+                  </button>
+                </div>
               )}
             </div>
 
