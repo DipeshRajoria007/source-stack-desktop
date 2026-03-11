@@ -10,6 +10,10 @@ use core::commands::{
 };
 use core::service::CoreService;
 
+pub fn try_run_internal_command() -> anyhow::Result<bool> {
+    core::pdf::maybe_run_pdf_extract_helper_from_args()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()

@@ -8,6 +8,10 @@ use source_stack_desktop_tauri_lib::core::pdf::PdfTextExtractor;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if source_stack_desktop_tauri_lib::try_run_internal_command()? {
+        return Ok(());
+    }
+
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: parity_harness <path-to-resume.pdf|docx>");
