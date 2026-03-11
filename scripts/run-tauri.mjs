@@ -8,6 +8,13 @@ const home = env.HOME || env.USERPROFILE || homedir();
 const isWindows = process.platform === "win32";
 const cargoExe = isWindows ? "cargo.exe" : "cargo";
 const tauriCmd = isWindows ? "tauri.cmd" : "tauri";
+const tauriCliScript = join(
+  process.cwd(),
+  "node_modules",
+  "@tauri-apps",
+  "cli",
+  "tauri.js",
+);
 const localTauriCmd = join(process.cwd(), "node_modules", ".bin", tauriCmd);
 const tauriExecutable = existsSync(localTauriCmd) ? localTauriCmd : tauriCmd;
 
@@ -33,12 +40,18 @@ if (!env.CARGO) {
   }
 }
 
-const child = spawn(tauriExecutable, process.argv.slice(2), {
-  stdio: "inherit",
-  env,
-  // Windows command shims like `tauri.cmd` need a shell to spawn correctly.
-  shell: isWindows,
-});
+const child = existsSync(tauriCliScript)
+  ? spawn(process.execPath, [tauriCliScript, ...process.argv.slice(2)], {
+      stdio: "inherit",
+      env,
+      shell: false,
+    })
+  : spawn(tauriExecutable, process.argv.slice(2), {
+      stdio: "inherit",
+      env,
+      // Windows command shims like `tauri.cmd` need a shell to spawn correctly.
+      shell: isWindows,
+    });
 
 child.on("exit", (code, signal) => {
   if (signal) {
