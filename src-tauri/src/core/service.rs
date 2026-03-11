@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -6,6 +6,7 @@ use anyhow::Context;
 use chrono::Utc;
 use futures::stream::{self, StreamExt};
 use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::task::AbortHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -50,7 +51,9 @@ pub struct CoreService {
     sheets: GoogleSheetsClient,
     job_store: Arc<JsonJobStore>,
     queue_tx: mpsc::UnboundedSender<BatchJobWorkItem>,
+    active_job_handles: Mutex<HashMap<String, AbortHandle>>,
     cancellation_tokens: Mutex<HashMap<String, CancellationToken>>,
+    killed_jobs: Mutex<HashSet<String>>,
 }
 
 impl CoreService {
@@ -97,7 +100,9 @@ impl CoreService {
             sheets,
             job_store,
             queue_tx,
+            active_job_handles: Mutex::new(HashMap::new()),
             cancellation_tokens: Mutex::new(HashMap::new()),
+            killed_jobs: Mutex::new(HashSet::new()),
         });
 
         let worker_service = Arc::clone(&service);
@@ -270,6 +275,51 @@ impl CoreService {
         Ok(false)
     }
 
+    pub async fn kill_job(&self, job_id: &str) -> anyhow::Result<bool> {
+        let Some(status) = self.job_store.load_status(job_id).await? else {
+            return Ok(false);
+        };
+
+        if matches!(
+            status.status,
+            JobProcessingState::Completed
+                | JobProcessingState::Failed
+                | JobProcessingState::Revoked
+        ) {
+            return Ok(false);
+        }
+
+        {
+            let mut killed_jobs = self.killed_jobs.lock().await;
+            killed_jobs.insert(job_id.to_string());
+        }
+
+        let cancellation_token = {
+            let map = self.cancellation_tokens.lock().await;
+            map.get(job_id).cloned()
+        };
+        if let Some(token) = cancellation_token {
+            token.cancel();
+        }
+
+        let abort_handle = {
+            let map = self.active_job_handles.lock().await;
+            map.get(job_id).cloned()
+        };
+        if let Some(handle) = abort_handle {
+            handle.abort();
+            return Ok(true);
+        }
+
+        if status.status == JobProcessingState::Pending {
+            self.mark_job_killed(job_id, "Job killed before processing started.")
+                .await?;
+            return Ok(true);
+        }
+
+        Ok(true)
+    }
+
     pub async fn google_auth_sign_in(&self) -> anyhow::Result<GoogleSignInResult> {
         let settings = self.settings.read().await.clone();
         self.auth.sign_in(&settings).await
@@ -339,9 +389,45 @@ impl CoreService {
         mut queue_rx: mpsc::UnboundedReceiver<BatchJobWorkItem>,
     ) {
         while let Some(work_item) = queue_rx.recv().await {
-            if let Err(err) = self.process_batch_job(work_item).await {
-                eprintln!("batch worker error: {err}");
+            let job_id = work_item.job_id.clone();
+
+            if self.take_killed_job(&job_id).await {
+                if let Err(err) = self
+                    .mark_job_killed(&job_id, "Job killed before processing started.")
+                    .await
+                {
+                    eprintln!("batch worker kill cleanup error for {job_id}: {err}");
+                }
+                self.clear_runtime_job_state(&job_id).await;
+                continue;
             }
+
+            let worker_service = Arc::clone(&self);
+            let task =
+                tokio::spawn(async move { worker_service.process_batch_job(work_item).await });
+            {
+                let mut active_job_handles = self.active_job_handles.lock().await;
+                active_job_handles.insert(job_id.clone(), task.abort_handle());
+            }
+
+            match task.await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    eprintln!("batch worker error: {err}");
+                }
+                Err(err) if err.is_cancelled() => {
+                    if let Err(save_err) =
+                        self.mark_job_killed(&job_id, "Job killed by user.").await
+                    {
+                        eprintln!("batch worker kill cleanup error for {job_id}: {save_err}");
+                    }
+                }
+                Err(err) => {
+                    eprintln!("batch worker task failed for {job_id}: {err}");
+                }
+            }
+
+            self.clear_runtime_job_state(&job_id).await;
         }
     }
 
@@ -729,6 +815,65 @@ fn ensure_filename_extension(file_name: &str, mime_type: &str) -> String {
             format!("{file_name}.docx")
         }
         _ => file_name.to_string(),
+    }
+}
+
+impl CoreService {
+    async fn take_killed_job(&self, job_id: &str) -> bool {
+        let mut killed_jobs = self.killed_jobs.lock().await;
+        killed_jobs.remove(job_id)
+    }
+
+    async fn clear_runtime_job_state(&self, job_id: &str) {
+        {
+            let mut active_job_handles = self.active_job_handles.lock().await;
+            active_job_handles.remove(job_id);
+        }
+        {
+            let mut cancellation_tokens = self.cancellation_tokens.lock().await;
+            cancellation_tokens.remove(job_id);
+        }
+        {
+            let mut killed_jobs = self.killed_jobs.lock().await;
+            killed_jobs.remove(job_id);
+        }
+    }
+
+    async fn mark_job_killed(&self, job_id: &str, message: &str) -> anyhow::Result<()> {
+        let Some(existing_status) = self.job_store.load_status(job_id).await? else {
+            return Ok(());
+        };
+
+        if matches!(
+            existing_status.status,
+            JobProcessingState::Completed
+                | JobProcessingState::Failed
+                | JobProcessingState::Revoked
+        ) {
+            return Ok(());
+        }
+
+        let completed_at = Utc::now();
+        let duration_seconds = existing_status.started_at.map(|started_at| {
+            (completed_at - started_at).num_milliseconds().max(0) as f64 / 1000.0
+        });
+
+        self.job_store
+            .save_status(&JobStatus {
+                job_id: existing_status.job_id,
+                status: JobProcessingState::Revoked,
+                progress: existing_status.progress,
+                total_files: existing_status.total_files,
+                processed_files: existing_status.processed_files,
+                spreadsheet_id: existing_status.spreadsheet_id,
+                results_count: existing_status.results_count,
+                error: Some(message.to_string()),
+                created_at: existing_status.created_at,
+                started_at: existing_status.started_at,
+                completed_at: Some(completed_at),
+                duration_seconds,
+            })
+            .await
     }
 }
 

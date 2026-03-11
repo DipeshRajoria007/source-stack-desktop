@@ -17,6 +17,7 @@ import {
   googleAuthSignIn,
   googleAuthSignOut,
   googleAuthStatus,
+  killJob,
   listDriveFiles,
   listDriveFolders,
   listJobs,
@@ -118,6 +119,7 @@ export default function App() {
   const [activeJobStatus, setActiveJobStatus] = useState<JobStatus | null>(null);
   const [jobs, setJobs] = useState<JobListItem[]>([]);
   const [jobsLoading, setJobsLoading] = useState(false);
+  const [jobActionBusyId, setJobActionBusyId] = useState<string | null>(null);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [selectedJobResults, setSelectedJobResults] = useState<ParsedCandidate[]>([]);
   const [selectedJobResultsLoading, setSelectedJobResultsLoading] = useState(false);
@@ -481,14 +483,36 @@ export default function App() {
       return;
     }
 
+    setJobActionBusyId(activeJobId);
     try {
       const response = await cancelJob(activeJobId);
       if (response.ok) {
         pushStatus(`Cancel requested for ${truncateMiddle(activeJobId, 18)}`, "info");
-        await refreshActiveJobStatus(activeJobId, true);
+        await refreshJobAfterAction(activeJobId);
       }
     } catch (error) {
       pushStatus(`Cancel failed: ${String(error)}`, "error");
+    } finally {
+      setJobActionBusyId((current) => (current === activeJobId ? null : current));
+    }
+  }
+
+  async function handleKillJob(jobId: string) {
+    setJobActionBusyId(jobId);
+
+    try {
+      const response = await killJob(jobId);
+      if (!response.ok) {
+        pushStatus(`Job ${truncateMiddle(jobId, 18)} could not be killed.`, "error");
+        return;
+      }
+
+      pushStatus(`Kill requested for ${truncateMiddle(jobId, 18)}`, "info");
+      await refreshJobAfterAction(jobId);
+    } catch (error) {
+      pushStatus(`Kill failed: ${String(error)}`, "error");
+    } finally {
+      setJobActionBusyId((current) => (current === jobId ? null : current));
     }
   }
 
@@ -730,6 +754,28 @@ export default function App() {
     setWorkspaceStatus({ text, tone });
   }
 
+  async function refreshJobAfterAction(jobId: string) {
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      try {
+        const status = await getJobStatus(jobId);
+        if (activeJobId === jobId) {
+          setActiveJobStatus(status);
+        }
+        upsertJobStatus(status);
+
+        if (isTerminalJobState(status.status)) {
+          break;
+        }
+      } catch {
+        break;
+      }
+
+      await new Promise((resolve) => window.setTimeout(resolve, 250));
+    }
+
+    await refreshJobsSummary(false);
+  }
+
   function syncActiveJobFromSummaries(nextJobs: JobListItem[]) {
     const current = activeJobId
       ? nextJobs.find((item) => item.status.jobId === activeJobId)?.status ?? null
@@ -795,6 +841,9 @@ export default function App() {
           onManualAuthInputChange={setManualAuthInput}
           onNavigateDrivePath={(folderId) => void loadDriveFolder(folderId)}
           onOpenDriveFolder={(folder) => void loadDriveFolder(folder.id)}
+          onKillActiveJob={() =>
+            activeJobId ? void handleKillJob(activeJobId) : undefined
+          }
           onOpenManualAuthUrl={() => void handleOpenManualAuthUrl()}
           onParse={() => void handleParseSingle()}
           onPickFile={(file) => void handlePickParseFile(file)}
@@ -809,6 +858,7 @@ export default function App() {
             void handleBeginManualAuth(openImmediately)
           }
           parseDragActive={parseDragActive}
+          jobActionBusy={jobActionBusyId === activeJobId}
           parseLoading={parseLoading}
           parseResult={parseResult}
           selectedDriveFolder={selectedDriveFolder}
@@ -820,8 +870,10 @@ export default function App() {
 
       {activeView === "jobs" && (
         <JobsView
+          jobActionBusy={jobActionBusyId === selectedJobId}
           jobs={jobs}
           jobsLoading={jobsLoading}
+          onKillJob={(jobId) => void handleKillJob(jobId)}
           onOpenDriveFile={(fileId) => void handleOpenDriveFile(fileId)}
           onOpenSpreadsheet={(id) => void handleOpenSpreadsheet(id)}
           onSelectJob={setSelectedJobId}
