@@ -294,6 +294,13 @@ impl CoreService {
             killed_jobs.insert(job_id.to_string());
         }
 
+        let kill_message = if status.status == JobProcessingState::Pending {
+            "Job killed before processing started."
+        } else {
+            "Job killed by user."
+        };
+        self.mark_job_killed(job_id, kill_message).await?;
+
         let cancellation_token = {
             let map = self.cancellation_tokens.lock().await;
             map.get(job_id).cloned()
@@ -308,13 +315,6 @@ impl CoreService {
         };
         if let Some(handle) = abort_handle {
             handle.abort();
-            return Ok(true);
-        }
-
-        if status.status == JobProcessingState::Pending {
-            self.mark_job_killed(job_id, "Job killed before processing started.")
-                .await?;
-            return Ok(true);
         }
 
         Ok(true)
@@ -479,8 +479,11 @@ impl CoreService {
             map.remove(&work_item.job_id);
         }
 
+        let was_killed = self.has_kill_request(&work_item.job_id).await;
+        let was_cancelled = cancellation_token.is_cancelled();
+
         match status_result {
-            Ok(()) => {
+            Ok(()) if !(was_killed || was_cancelled) => {
                 let completed_at = Utc::now();
                 self.job_store
                     .save_results(&work_item.job_id, &results)
@@ -505,14 +508,31 @@ impl CoreService {
                     })
                     .await?;
             }
+            Ok(()) => {
+                self.job_store
+                    .save_results(&work_item.job_id, &results)
+                    .await?;
+                self.mark_job_killed(&work_item.job_id, "Job killed by user.")
+                    .await?;
+            }
             Err(err) => {
                 let completed_at = Utc::now();
-                let was_cancelled = cancellation_token.is_cancelled();
-                let status = if was_cancelled {
+                let status = if was_killed || was_cancelled {
                     JobProcessingState::Revoked
                 } else {
                     JobProcessingState::Failed
                 };
+                let error_message = if was_killed {
+                    "Job killed by user.".to_string()
+                } else {
+                    err.to_string()
+                };
+
+                if status == JobProcessingState::Revoked {
+                    self.job_store
+                        .save_results(&work_item.job_id, &results)
+                        .await?;
+                }
 
                 self.job_store
                     .save_status(&JobStatus {
@@ -528,7 +548,7 @@ impl CoreService {
                         processed_files: processed_count,
                         spreadsheet_id,
                         results_count: Some(results.len() as i32),
-                        error: Some(err.to_string()),
+                        error: Some(error_message),
                         created_at,
                         started_at: Some(started_at),
                         completed_at: Some(completed_at),
@@ -557,6 +577,8 @@ impl CoreService {
         created_at: Option<chrono::DateTime<Utc>>,
         started_at: chrono::DateTime<Utc>,
     ) -> anyhow::Result<()> {
+        self.ensure_job_not_stopped(&work_item.job_id, cancellation_token)
+            .await?;
         self.job_store
             .save_status(&JobStatus {
                 job_id: work_item.job_id.clone(),
@@ -574,6 +596,8 @@ impl CoreService {
             })
             .await?;
 
+        self.ensure_job_not_stopped(&work_item.job_id, cancellation_token)
+            .await?;
         let access_token = self.auth.get_access_token_non_interactive(settings).await?;
         let drive_files = self
             .drive
@@ -589,6 +613,8 @@ impl CoreService {
 
         *total_files = drive_files.len() as i32;
 
+        self.ensure_job_not_stopped(&work_item.job_id, cancellation_token)
+            .await?;
         if spreadsheet_id.as_deref().unwrap_or_default().is_empty() {
             let created_sheet = self
                 .sheets
@@ -616,6 +642,8 @@ impl CoreService {
             *spreadsheet_id = Some(created_sheet);
         }
 
+        self.ensure_job_not_stopped(&work_item.job_id, cancellation_token)
+            .await?;
         self.job_store
             .save_status(&JobStatus {
                 job_id: work_item.job_id.clone(),
@@ -635,9 +663,8 @@ impl CoreService {
 
         let chunk_size = settings.spreadsheet_batch_size.max(1);
         for batch in drive_files.chunks(chunk_size) {
-            if cancellation_token.is_cancelled() {
-                return Err(anyhow::anyhow!("job canceled"));
-            }
+            self.ensure_job_not_stopped(&work_item.job_id, cancellation_token)
+                .await?;
 
             let max_concurrency = settings.max_concurrent_requests.max(1);
             let batch_results: Vec<ParsedCandidate> = stream::iter(batch.iter().cloned())
@@ -653,6 +680,8 @@ impl CoreService {
                 .collect()
                 .await;
 
+            self.ensure_job_not_stopped(&work_item.job_id, cancellation_token)
+                .await?;
             let rows: Vec<Vec<String>> = batch_results
                 .iter()
                 .map(|candidate| {
@@ -673,6 +702,8 @@ impl CoreService {
                 .collect();
 
             if !rows.is_empty() {
+                self.ensure_job_not_stopped(&work_item.job_id, cancellation_token)
+                    .await?;
                 if let Some(sheet_id) = spreadsheet_id.as_deref() {
                     self.sheets
                         .append_rows(&access_token, sheet_id, &rows, true)
@@ -684,6 +715,8 @@ impl CoreService {
 
             results.extend(batch_results);
 
+            self.ensure_job_not_stopped(&work_item.job_id, cancellation_token)
+                .await?;
             let progress = if *total_files == 0 {
                 0
             } else {
@@ -819,9 +852,26 @@ fn ensure_filename_extension(file_name: &str, mime_type: &str) -> String {
 }
 
 impl CoreService {
+    async fn has_kill_request(&self, job_id: &str) -> bool {
+        let killed_jobs = self.killed_jobs.lock().await;
+        killed_jobs.contains(job_id)
+    }
+
     async fn take_killed_job(&self, job_id: &str) -> bool {
         let mut killed_jobs = self.killed_jobs.lock().await;
         killed_jobs.remove(job_id)
+    }
+
+    async fn ensure_job_not_stopped(
+        &self,
+        job_id: &str,
+        cancellation_token: &CancellationToken,
+    ) -> anyhow::Result<()> {
+        if cancellation_token.is_cancelled() || self.has_kill_request(job_id).await {
+            return Err(anyhow::anyhow!("job canceled"));
+        }
+
+        Ok(())
     }
 
     async fn clear_runtime_job_state(&self, job_id: &str) {
