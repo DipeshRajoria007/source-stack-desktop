@@ -507,6 +507,7 @@ export default function App() {
         return;
       }
 
+      markJobKilledLocally(jobId, "Job killed by user.");
       pushStatus(`Kill requested for ${truncateMiddle(jobId, 18)}`, "info");
       await refreshJobAfterAction(jobId);
     } catch (error) {
@@ -752,6 +753,38 @@ export default function App() {
 
   function pushStatus(text: string, tone: StatusTone) {
     setWorkspaceStatus({ text, tone });
+  }
+
+  function markJobKilledLocally(jobId: string, message: string) {
+    const knownStatus =
+      (activeJobId === jobId ? activeJobStatus : null) ??
+      jobs.find((item) => item.status.jobId === jobId)?.status ??
+      null;
+
+    if (!knownStatus) {
+      return;
+    }
+
+    const completedAt = new Date().toISOString();
+    const durationSeconds =
+      knownStatus.durationSeconds ??
+      (knownStatus.startedAt
+        ? Math.max(0, (Date.parse(completedAt) - Date.parse(knownStatus.startedAt)) / 1000)
+        : null);
+
+    const nextStatus: JobStatus = {
+      ...knownStatus,
+      status: "revoked",
+      completedAt,
+      durationSeconds,
+      error: message,
+    };
+
+    if (activeJobId === jobId) {
+      setActiveJobStatus(nextStatus);
+    }
+
+    upsertJobStatus(nextStatus);
   }
 
   async function refreshJobAfterAction(jobId: string) {
