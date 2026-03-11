@@ -15,10 +15,13 @@ const tauriCliScript = join(
   "cli",
   "tauri.js",
 );
+const localBinDir = join(process.cwd(), "node_modules", ".bin");
 const localTauriCmd = join(process.cwd(), "node_modules", ".bin", tauriCmd);
 const tauriExecutable = existsSync(localTauriCmd) ? localTauriCmd : tauriCmd;
 
 const candidateDirs = [
+  localBinDir,
+  env.PNPM_HOME || "",
   join(home, ".cargo", "bin"),
   env.CARGO_HOME ? join(env.CARGO_HOME, "bin") : "",
 ].filter(Boolean);
